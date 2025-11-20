@@ -1,0 +1,18 @@
+{{define "jobs"}}
+{{if eq (len .Jobs) 0}}
+<div class="help" style="grid-column:1/-1">No jobs found.</div>
+{{end}}
+{{range .Jobs}}
+<div class="job-card" id="job-{{.id}}">
+  <div class="job-head">
+    <div class="status {{.status}}">{{.status}}</div>
+    <div class="job-id" title="{{.id}}">{{.id}}</div>
+  </div>
+  <div class="help">{{if .note.Valid}}{{.note.String}}{{else}}No notes yet{{end}}</div>
+  <div class="actions">
+    <button class="ghost" hx-get="/job/details?id={{.id}}" hx-target="#job-{{.id}}" hx-swap="afterend">Details</button>
+    <button hx-post="/job/status" hx-target="#job-{{.id}}" hx-swap="outerHTML" hx-vals='{"jobID":"{{.id}}","status":"INTERESTED"}'>Interested</button>
+  </div>
+</div>
+{{end}}
+{{end}}

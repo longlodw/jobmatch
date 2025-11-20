@@ -1,0 +1,29 @@
+{{define "base"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>{{block "title" .}}JobMatch{{end}}</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="/static/style.css" />
+<script src="https://unpkg.com/htmx.org@1.9.10"></script>
+</head>
+<body>
+<header>
+  <div class="header-inner">
+    <div class="brand"><div class="brand-badge"></div><span>JobMatch</span></div>
+    <div class="spacer"></div>
+    {{if .Authenticated}}
+      <form method="post" action="/logout" style="margin:0"><button class="ghost" hx-post="/logout" hx-target="body" hx-swap="innerHTML">Logout</button></form>
+    {{else}}
+      <form method="get" action="/login" style="margin:0"><button>Login with Google</button></form>
+    {{end}}
+  </div>
+</header>
+<div class="container">
+  {{block "content" .}}{{end}}
+  <footer>JobMatch • {{.Year}}</footer>
+</div>
+</body>
+</html>
+{{end}}
