@@ -62,6 +62,12 @@ type IStorage interface {
 		note        sql.NullString
 		lastUpdated sql.NullTime
 	}, err error)
+	SelectJob(ctx context.Context, userID, jobID string) (job struct {
+		id          string
+		status      string
+		note        sql.NullString
+		lastUpdated sql.NullTime
+	}, err error)
 
 	GetJobContent(ctx context.Context, id string) (jobContent string, err error)
 	StoreCode(ctx context.Context, codeVerifier, codeChallenge string) error
@@ -119,8 +125,8 @@ func NewStorage(ctx context.Context, dbConnStr, pgSecret, minioEndpoint, minioAc
 			last_searched TIMESTAMPTZ DEFAULT NULL
 		);
 		CREATE TABLE IF NOT EXISTS resumes (
-			id TEXT KEY,
-			user_id TEXT FOREIGN KEY REFERENCES users(id),
+			id TEXT,
+			user_id TEXT,
 			last_updated TIMESTAMPTZ DEFAULT NOW(),
 			PRIMARY KEY (id, user_id)
 		);
@@ -128,8 +134,8 @@ func NewStorage(ctx context.Context, dbConnStr, pgSecret, minioEndpoint, minioAc
 		CREATE INDEX IF NOT EXISTS user_id_to_resumes ON resumes (user_id);
 		CREATE TABLE IF NOT EXISTS jobs (
 			id TEXT,
-			user_id TEXT FOREIGN KEY REFERENCES users(id),
-			resume_id TEXT FOREIGN KEY REFERENCES resumes(id),
+			user_id TEXT,
+			resume_id TEXT,
 			status TEXT,
 			note TEXT DEFAULT NULL,
 			application_drive_id TEXT DEFAULT NULL,
@@ -142,7 +148,7 @@ func NewStorage(ctx context.Context, dbConnStr, pgSecret, minioEndpoint, minioAc
 		CREATE EXTENSION IF NOT EXISTS pgcrypto;
 		CREATE EXTENSION IF NOT EXISTS vector;
 		CREATE TABLE IF NOT EXISTS resume_embeddings (
-			resume_id TEXT FOREIGN KEY REFERENCES resumes(id),
+			resume_id TEXT,
 			embedding VECTOR(3072)
 		);
 		CREATE INDEX IF NOT EXISTS resume_id_to_embeddings ON resume_embeddings (resume_id);
@@ -162,7 +168,7 @@ func NewStorage(ctx context.Context, dbConnStr, pgSecret, minioEndpoint, minioAc
 func (s *Storage) InsertUser(ctx context.Context, id, refreshToken string) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO users (id, refresh_token) VALUES ($1, pgp_sym_encrypt($2, $3))
-		ON CONFLICT (id) SET refresh_token = pgp_sym_encrypt($2, $3);
+		ON CONFLICT (id) DO UPDATE SET refresh_token = pgp_sym_encrypt($2, $3);
 	`, id, refreshToken, s.pgSecret)
 	return err
 }
@@ -170,7 +176,7 @@ func (s *Storage) InsertUser(ctx context.Context, id, refreshToken string) error
 func (s *Storage) UpdateUserToken(ctx context.Context, id, refreshToken string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE users
-		SET refresh_token = pgp_sym_encrypt($2, $4),
+		SET refresh_token = pgp_sym_encrypt($2, $3)
 		WHERE id = $1;
 	`, id, refreshToken, s.pgSecret)
 	return err
@@ -181,7 +187,7 @@ func (s *Storage) UpdateUserDriveTokens(ctx context.Context, id, accessToken, re
 		UPDATE users
 		SET drive_access_token = pgp_sym_encrypt($2, $5),
 			drive_refresh_token = pgp_sym_encrypt($3, $5),
-			token_expiry = $4
+			drive_token_expiry = $4
 		WHERE id = $1;
 	`, id, accessToken, refreshToken, tokenExpiry, s.pgSecret)
 	return err
@@ -190,7 +196,7 @@ func (s *Storage) UpdateUserDriveTokens(ctx context.Context, id, accessToken, re
 func (s *Storage) UpdateUserSearchURL(ctx context.Context, id, searchURL string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE users
-		SET search_url = $2,
+		SET search_url = $2
 		WHERE id = $1;
 	`, id, searchURL)
 	return err
@@ -216,7 +222,7 @@ func (s *Storage) SelectUserToken(ctx context.Context, id string) (refreshToken 
 
 func (s *Storage) SelectUserDriveTokens(ctx context.Context, id string) (driveAccessToken, driveRefreshToken string, tokenExpiry sql.NullTime, err error) {
 	err = s.db.QueryRowContext(ctx, `
-		SELECT pgp_sym_decrypt(drive_access_token, $2), pgp_sym_decrypt(drive_refresh_token, $2), token_expiry
+		SELECT pgp_sym_decrypt(drive_access_token, $2), pgp_sym_decrypt(drive_refresh_token, $2), drive_token_expiry
 		FROM users
 		WHERE id = $1;
 	`, id, s.pgSecret).Scan(&driveAccessToken, &driveRefreshToken, &tokenExpiry)
@@ -354,7 +360,7 @@ func (s *Storage) InsertJob(ctx context.Context, id, userID, resumeID, jobConten
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO jobs (id, user_id, resume_id, status)
 		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (id, user_id) SET resume_id = EXCLUDED.resume_id;
+		ON CONFLICT (id, user_id) DO UPDATE SET resume_id = EXCLUDED.resume_id;
 	`, id, userID, resumeID, JobStatusPending)
 	if err != nil {
 		return err
@@ -400,7 +406,7 @@ func (s *Storage) SelectJobsByUser(ctx context.Context, userID string, offset in
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, status, note, last_updated
 		FROM jobs
-		WHERE user_id = $1;
+		WHERE user_id = $1
 		LIMIT 20 OFFSET $2;
 	`, userID, offset)
 	if err != nil {
@@ -436,7 +442,7 @@ func (s *Storage) SelectJobByStatus(ctx context.Context, userID, status string, 
 	lastUpdated sql.NullTime
 }, err error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, note, last_updated
+		SELECT id, status, note, last_updated
 		FROM jobs
 		WHERE user_id = $1 AND status = $2
 		LIMIT 20 OFFSET $3;
@@ -446,10 +452,10 @@ func (s *Storage) SelectJobByStatus(ctx context.Context, userID, status string, 
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var id string
+		var id, st string
 		var note sql.NullString
 		var lastUpdated sql.NullTime
-		if err := rows.Scan(&id, &note, &lastUpdated); err != nil {
+		if err := rows.Scan(&id, &st, &note, &lastUpdated); err != nil {
 			return nil, err
 		}
 		jobs = append(jobs, struct {
@@ -459,12 +465,26 @@ func (s *Storage) SelectJobByStatus(ctx context.Context, userID, status string, 
 			lastUpdated sql.NullTime
 		}{
 			id:          id,
-			status:      status,
+			status:      st,
 			note:        note,
 			lastUpdated: lastUpdated,
 		})
 	}
 	return jobs, rows.Err()
+}
+
+func (s *Storage) SelectJob(ctx context.Context, userID, jobID string) (job struct {
+	id          string
+	status      string
+	note        sql.NullString
+	lastUpdated sql.NullTime
+}, err error) {
+	err = s.db.QueryRowContext(ctx, `
+		SELECT id, status, note, last_updated
+		FROM jobs
+		WHERE user_id = $1 AND id = $2;
+	`, userID, jobID).Scan(&job.id, &job.status, &job.note, &job.lastUpdated)
+	return
 }
 
 func (s *Storage) GetJobContent(ctx context.Context, id string) (jobContent string, err error) {
@@ -533,6 +553,4 @@ func (s *Storage) DeleteState(ctx context.Context, state string) error {
 	return s.minioClient.RemoveObject(ctx, s.bucketName, "states/"+state+".txt", minio.RemoveObjectOptions{})
 }
 
-func (s *Storage) Close() error {
-	return s.db.Close()
-}
+func (s *Storage) Close() error { return s.db.Close() }
