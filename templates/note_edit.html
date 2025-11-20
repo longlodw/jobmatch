@@ -1,0 +1,10 @@
+{{define "note_edit"}}
+<form hx-post="/job/note/save" hx-target="#note-{{.JobID}}" hx-swap="outerHTML" style="display:flex;flex-direction:column;gap:6px">
+  <textarea name="note" class="input" style="min-height:90px" placeholder="Enter note">{{.Current}}</textarea>
+  <input type="hidden" name="jobID" value="{{.JobID}}" />
+  <div style="display:flex;gap:8px;flex-wrap:wrap">
+    <button>Save</button>
+    <button type="button" class="ghost" hx-get="/job/note/cancel?jobID={{.JobID}}" hx-target="#note-{{.JobID}}" hx-swap="outerHTML">Cancel</button>
+  </div>
+</form>
+{{end}}

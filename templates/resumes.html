@@ -1,0 +1,25 @@
+{{define "resumes"}}
+<div class="panel">
+  <div class="panel-header"><strong>Resumes</strong><div class="help">Uploaded resume documents</div></div>
+  <div class="panel-body">
+    {{if .Authenticated}}
+    <form hx-post="/resumes/upload" hx-target="#resumeUploadStatus" hx-swap="innerHTML" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+      <input name="fileID" class="input" placeholder="Google Doc File ID" required />
+      <button>Upload</button>
+    </form>
+    <div id="resumeUploadStatus" class="help"></div>
+    <div class="grid-jobs" style="margin-top:10px; grid-template-columns:repeat(auto-fill,minmax(200px,1fr));">
+      {{if eq (len .Resumes) 0}}<div class="help" style="grid-column:1/-1">No resumes uploaded.</div>{{end}}
+      {{range .Resumes}}
+        <div class="job-card">
+          <div class="job-head"><div class="status PENDING">RESUME</div><div class="job-id" title="{{.id}}">{{.id}}</div></div>
+          <div class="help">Last Updated: {{if .lastUpdated.Valid}}{{.lastUpdated.Time}}{{else}}-{{end}}</div>
+        </div>
+      {{end}}
+    </div>
+    {{else}}
+      <div class="help">Login to manage resumes.</div>
+    {{end}}
+  </div>
+</div>
+{{end}}

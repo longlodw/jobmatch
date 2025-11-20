@@ -1,0 +1,20 @@
+{{define "settings"}}
+<div class="panel">
+  <div class="panel-header"><strong>Settings</strong><div class="help">Search configuration & integrations</div></div>
+  <div class="panel-body">
+    {{if .Authenticated}}
+    <form hx-post="/settings/search" hx-target="#searchStatus" hx-swap="innerHTML" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+      <input name="searchURL" class="input" placeholder="Search URL" value="{{.SearchURL}}" required />
+      <button>Save</button>
+    </form>
+    <div id="searchStatus" class="help">Current: {{if .SearchURL}}{{.SearchURL}}{{else}}(none){{end}}</div>
+    <div style="margin-top:18px">
+      <button hx-get="/settings/drive" hx-target="#driveStatus" hx-swap="innerHTML" class="ghost">Enable Google Drive</button>
+      <div id="driveStatus" class="help" style="margin-top:8px"></div>
+    </div>
+    {{else}}
+      <div class="help">Login to configure settings.</div>
+    {{end}}
+  </div>
+</div>
+{{end}}

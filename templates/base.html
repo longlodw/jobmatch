@@ -7,17 +7,31 @@
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <link rel="stylesheet" href="/static/style.css" />
 <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+{{if .CSRF}}
+<meta name="csrf-token" content="{{.CSRF}}" />
+<script>
+document.addEventListener('htmx:configRequest', function(evt){
+  var meta = document.querySelector('meta[name="csrf-token"]');
+  if(meta){ evt.detail.headers['X-CSRF-Token'] = meta.content; }
+});
+</script>
+{{end}}
 </head>
 <body>
 <header>
   <div class="header-inner">
     <div class="brand"><div class="brand-badge"></div><span>JobMatch</span></div>
     <div class="spacer"></div>
-    {{if .Authenticated}}
-      <form method="post" action="/logout" style="margin:0"><button class="ghost" hx-post="/logout" hx-target="body" hx-swap="innerHTML">Logout</button></form>
-    {{else}}
-      <form method="get" action="/login" style="margin:0"><button>Login with Google</button></form>
-    {{end}}
+     {{if .Authenticated}}
+       <nav class="nav" style="display:flex;gap:10px;align-items:center;margin-right:16px">
+         <button class="ghost" hx-get="/jobs" hx-target="#jobs" hx-swap="innerHTML" hx-include="#statusFilter">Jobs</button>
+         <button class="ghost" hx-get="/resumes" hx-target="#details-area" hx-swap="innerHTML">Resumes</button>
+         <button class="ghost" hx-get="/settings" hx-target="#details-area" hx-swap="innerHTML">Settings</button>
+       </nav>
+       <form method="post" action="/logout" style="margin:0"><button class="ghost" hx-post="/logout" hx-target="body" hx-swap="innerHTML">Logout</button></form>
+     {{else}}
+       <form method="get" action="/login" style="margin:0"><button>Login with Google</button></form>
+     {{end}}
   </div>
 </header>
 <div class="container">

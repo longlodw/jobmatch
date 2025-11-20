@@ -3,16 +3,29 @@
 <div class="help" style="grid-column:1/-1">No jobs found.</div>
 {{end}}
 {{range .Jobs}}
+{{template "job_card" .}}
+{{end}}
+{{end}}
+
+{{define "job_card"}}
 <div class="job-card" id="job-{{.id}}">
   <div class="job-head">
     <div class="status {{.status}}">{{.status}}</div>
     <div class="job-id" title="{{.id}}">{{.id}}</div>
   </div>
-  <div class="help">{{if .note.Valid}}{{.note.String}}{{else}}No notes yet{{end}}</div>
+  <div class="help" id="note-{{.id}}">{{if .note.Valid}}{{.note.String}}{{else}}No notes yet{{end}}</div>
   <div class="actions">
-    <button class="ghost" hx-get="/job/details?id={{.id}}" hx-target="#job-{{.id}}" hx-swap="afterend">Details</button>
-    <button hx-post="/job/status" hx-target="#job-{{.id}}" hx-swap="outerHTML" hx-vals='{"jobID":"{{.id}}","status":"INTERESTED"}'>Interested</button>
+    <button class="ghost" hx-get="/job/details?id={{.id}}" hx-target="#details-area" hx-swap="innerHTML">Details</button>
+    <button class="ghost" hx-get="/job/note/edit?jobID={{.id}}" hx-target="#note-{{.id}}" hx-swap="outerHTML">Edit Note</button>
+    <select class="input" hx-post="/job/status" hx-target="#job-{{.id}}" hx-swap="outerHTML" hx-vals='{"jobID":"{{.id}}"}' name="status">
+      <option {{if eq .status "PENDING"}}selected{{end}}>PENDING</option>
+      <option {{if eq .status "INTERESTED"}}selected{{end}}>INTERESTED</option>
+      <option {{if eq .status "NOT_INTERESTED"}}selected{{end}}>NOT_INTERESTED</option>
+      <option {{if eq .status "APPLIED"}}selected{{end}}>APPLIED</option>
+      <option {{if eq .status "INTERVIEWING"}}selected{{end}}>INTERVIEWING</option>
+      <option {{if eq .status "OFFERED"}}selected{{end}}>OFFERED</option>
+      <option {{if eq .status "REJECTED"}}selected{{end}}>REJECTED</option>
+    </select>
   </div>
 </div>
-{{end}}
 {{end}}
