@@ -1,5 +1,5 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 # JobMatch Pod creation script using podman.
 # Loads environment variables from .env (key=value) file in repo root.
@@ -7,7 +7,7 @@ set -euo pipefail
 # containers: postgres, minio, nginx-jobfetcher-cache, app.
 # Idempotent: skips creating containers if they already exist.
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
+REPO_DIR="$(cd "$(dirname "$0")"/.. && pwd)"
 APP_ENV_FILE="${REPO_DIR}/.env.app"
 POSTGRES_ENV_FILE="${REPO_DIR}/.env.postgres"
 MINIO_ENV_FILE="${REPO_DIR}/.env.minio"
@@ -19,34 +19,39 @@ MINIO_IMAGE="quay.io/minio/minio:latest"
 NGINX_IMAGE="docker.io/library/nginx:1.27"
 
 # Ensure per-service env files exist
-for f in "${APP_ENV_FILE}" "${POSTGRES_ENV_FILE}" "${MINIO_ENV_FILE}" "${NGINX_ENV_FILE}"; do
-  if [[ ! -f "$f" ]]; then
+for f in "$APP_ENV_FILE" "$POSTGRES_ENV_FILE" "$MINIO_ENV_FILE" "$NGINX_ENV_FILE"; do
+  if [ ! -f "$f" ]; then
     echo "Missing env file: $f" >&2
     exit 1
   fi
 done
 
 # Export variables from app env to validate required vars (ignore comments / blank lines)
-set -a
-# shellcheck disable=SC2046
-source <(grep -v '^#' "${APP_ENV_FILE}" | sed -e '/^$/d')
-set +a
+# Load app env file into current shell
+# shellcheck disable=SC2163
+while IFS='=' read -r key value; do
+  [ -z "$key" ] && continue
+  case "$key" in \#*) continue ;; esac
+  # Preserve quotes as literal if present
+  eval "export $key=$value"
+done < "$APP_ENV_FILE"
 
 # Required variables (fail fast if empty)
-required_vars=(GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GOOGLE_REDIRECT_URL PG_CONN_STR PG_SECRET MINIO_ENDPOINT MINIO_ACCESS_KEY MINIO_SECRET_KEY MINIO_BUCKET JOB_FETCHER_URL JOB_FETCHER_TOKEN OPENAI_BASE_URL OPENAI_API_KEY)
-missing=()
-for v in "${required_vars[@]}"; do
-  if [[ -z "${!v:-}" ]]; then
-    missing+=("$v")
+required_vars="GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GOOGLE_REDIRECT_URL PG_CONN_STR PG_SECRET MINIO_ENDPOINT MINIO_ACCESS_KEY MINIO_SECRET_KEY MINIO_BUCKET JOB_FETCHER_URL JOB_FETCHER_TOKEN OPENAI_BASE_URL OPENAI_API_KEY"
+missing=""
+for v in $required_vars; do
+  eval val="\${$v:-}"
+  if [ -z "$val" ]; then
+    missing="$missing $v"
   fi
 done
-if (( ${#missing[@]} > 0 )); then
-  echo "Missing required env vars: ${missing[*]}" >&2
+if [ -n "$missing" ]; then
+  echo "Missing required env vars:$missing" >&2
   exit 1
 fi
 
 # Create pod if not exists
-if ! podman pod exists "${POD_NAME}"; then
+if ! podman pod exists "$POD_NAME"; then
   echo "Creating pod ${POD_NAME}"
   podman pod create --name "${POD_NAME}" -p 8080:8080 -p 5432:5432 -p 9000:9000 -p 9001:9001 -p 8081:8081
 else
@@ -85,7 +90,7 @@ fi
 NGINX_CONF_DIR="${HOST_BASE}/nginx/conf"
 mkdir -p "${NGINX_CONF_DIR}" "${HOST_BASE}/nginx/cache"
 NGINX_CONF_FILE="${NGINX_CONF_DIR}/nginx.conf"
-if [[ ! -f "${NGINX_CONF_FILE}" ]]; then
+if [ ! -f "$NGINX_CONF_FILE" ]; then
   cat > "${NGINX_CONF_FILE}" <<'EOF'
 # Nginx reverse proxy + cache for remote job fetcher
 proxy_cache_path /cache levels=1:2 keys_zone=jobfetcher_cache:10m max_size=500m inactive=30m use_temp_path=off;
@@ -124,7 +129,7 @@ else
 fi
 
 # Ensure app image present (user must build beforehand)
-if ! podman image exists "${APP_IMAGE}"; then
+if ! podman image exists "$APP_IMAGE"; then
   echo "App image ${APP_IMAGE} not found. Build it first with: podman build -t ${APP_IMAGE} ." >&2
   exit 1
 fi
