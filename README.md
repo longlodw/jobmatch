@@ -73,10 +73,10 @@ Optional variables with defaults:
 
 ## Podman Pod (Local Dev)
 
-A helper script `scripts/create_pod.sh` replaces the previous `podman-pod.yaml`. It creates an idempotent multi-container pod (Postgres, MinIO, Nginx cache proxy, app) using values from `.env`.
+A helper script `scripts/create_pod.sh` replaces the previous `podman-pod.yaml`. It creates an idempotent multi-container pod (Postgres, MinIO, Nginx cache proxy, app) using per-service env files: `.env.app`, `.env.postgres`, `.env.minio`, `.env.nginx`.
 
 Steps:
-1. Populate `.env` with all required variables (see table above).
+1. Populate `.env.app`, `.env.postgres`, `.env.minio` (and optional `.env.nginx`) with required variables (see table above for app).
 2. Build the app image: `podman build -t localhost/jobmatch:latest .`
 3. Run the script: `bash scripts/create_pod.sh`
 4. Inspect containers: `podman ps --filter pod=jobmatch-pod`
@@ -86,7 +86,7 @@ The script:
 - Fails fast if required variables are missing.
 - Reuses existing pod/containers on subsequent runs.
 - Mounts host directories under `/var/lib/podman_volumes/jobmatch/` for persistence.
-- Supplies all app env vars via `--env-file .env` (plus selected overrides).
+- Supplies env vars for each container via its own `--env-file`.
 
 To rebuild and restart app only:
 ```bash

@@ -8,23 +8,28 @@ set -euo pipefail
 # Idempotent: skips creating containers if they already exist.
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
-ENV_FILE="${REPO_DIR}/.env"
+APP_ENV_FILE="${REPO_DIR}/.env.app"
+POSTGRES_ENV_FILE="${REPO_DIR}/.env.postgres"
+MINIO_ENV_FILE="${REPO_DIR}/.env.minio"
+NGINX_ENV_FILE="${REPO_DIR}/.env.nginx"
 POD_NAME="jobmatch-pod"
 APP_IMAGE="localhost/jobmatch:latest"
 POSTGRES_IMAGE="docker.io/library/postgres:16"
 MINIO_IMAGE="quay.io/minio/minio:latest"
 NGINX_IMAGE="docker.io/library/nginx:1.27"
 
-# Ensure .env exists
-if [[ ! -f "${ENV_FILE}" ]]; then
-  echo "Missing .env file at ${ENV_FILE}" >&2
-  exit 1
-fi
+# Ensure per-service env files exist
+for f in "${APP_ENV_FILE}" "${POSTGRES_ENV_FILE}" "${MINIO_ENV_FILE}" "${NGINX_ENV_FILE}"; do
+  if [[ ! -f "$f" ]]; then
+    echo "Missing env file: $f" >&2
+    exit 1
+  fi
+done
 
-# Export variables from .env (ignore comments / blank lines)
+# Export variables from app env to validate required vars (ignore comments / blank lines)
 set -a
 # shellcheck disable=SC2046
-source <(grep -v '^#' "${ENV_FILE}" | sed -e '/^$/d')
+source <(grep -v '^#' "${APP_ENV_FILE}" | sed -e '/^$/d')
 set +a
 
 # Required variables (fail fast if empty)
@@ -57,9 +62,7 @@ if ! podman container exists postgres || ! podman container inspect postgres >/d
   echo "Starting postgres container"
   podman run -d --restart=always --pod "${POD_NAME}" \
     --name postgres \
-    -e POSTGRES_DB=jobmatch \
-    -e POSTGRES_USER=jobmatch \
-    -e POSTGRES_PASSWORD=jobmatchpwd \
+    --env-file "${POSTGRES_ENV_FILE}" \
     -v "${HOST_BASE}/postgres:/var/lib/postgresql/data" \
     "${POSTGRES_IMAGE}"
 else
@@ -71,8 +74,7 @@ if ! podman container exists minio || ! podman container inspect minio >/dev/nul
   echo "Starting minio container"
   podman run -d --restart=always --pod "${POD_NAME}" \
     --name minio \
-    -e MINIO_ROOT_USER="${MINIO_ACCESS_KEY}" \
-    -e MINIO_ROOT_PASSWORD="${MINIO_SECRET_KEY}" \
+    --env-file "${MINIO_ENV_FILE}" \
     -v "${HOST_BASE}/minio:/data" \
     "${MINIO_IMAGE}" server /data
 else
@@ -113,6 +115,7 @@ if ! podman container exists nginx-jobfetcher-cache || ! podman container inspec
   echo "Starting nginx-jobfetcher-cache container"
   podman run -d --restart=always --pod "${POD_NAME}" \
     --name nginx-jobfetcher-cache \
+    --env-file "${NGINX_ENV_FILE}" \
     -v "${NGINX_CONF_DIR}:/etc/nginx" \
     -v "${HOST_BASE}/nginx/cache:/cache" \
     "${NGINX_IMAGE}"
@@ -131,10 +134,7 @@ if ! podman container exists jobmatch-app || ! podman container inspect jobmatch
   echo "Starting jobmatch app container"
   podman run -d --restart=always --pod "${POD_NAME}" \
     --name jobmatch-app \
-    --env-file "${ENV_FILE}" \
-    -e ROOT_FOLDER_NAME="${ROOT_FOLDER_NAME:-JobMatch Applications}" \
-    -e SERVER_ADDR="${SERVER_ADDR:-:8080}" \
-    -e PG_CONN_STR="${PG_CONN_STR}" \
+    --env-file "${APP_ENV_FILE}" \
     "${APP_IMAGE}"
 else
   echo "jobmatch-app container already exists"
