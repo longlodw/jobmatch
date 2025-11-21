@@ -88,23 +88,6 @@ Optional variables with defaults:
 - Plain text responses remain for simple POST actions (`/settings/search`, resume upload success messages). These can be migrated to fragments if richer UI feedback is desired.
 - CSRF is enforced on all POST endpoints and select GET endpoints that expose user settings or integration flows.
 
-## Future / Backlog (Not Yet Implemented Here)
-
-The original broader MVP vision (swipe interface, re‑ranking, multi‑service split, PostgREST/RLS enforcement in a separate stack) is not fully represented in this single repository. Potential next steps:
-- Expand UI to include swipe / table views with richer filtering
-- Re‑rank matches using cross‑encoders and add explanation tooltips
-- Resume tailoring / cover letter drafting workflow
-- Background scheduler for recurring embedding + ingestion tasks
-- Drive folder organization enhancements (subfolders per stage)
-- Structured audit logging with searchable index
-
-## Contributing
-
-1. Open an issue describing proposed change.
-2. Keep handlers lean; prefer adding helper functions for repeated logic.
-3. Maintain consistent error fragment usage.
-4. Avoid adding heavy dependencies without discussion.
-
 ## License
 
-(Choose and state a license appropriate for distribution; currently not specified.)
+MIT License. See `LICENSE` file for details.
