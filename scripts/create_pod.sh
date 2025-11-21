@@ -14,9 +14,9 @@ MINIO_ENV_FILE="${REPO_DIR}/.env.minio"
 NGINX_ENV_FILE="${REPO_DIR}/.env.nginx"
 POD_NAME="jobmatch-pod"
 APP_IMAGE="localhost/jobmatch:latest"
-POSTGRES_IMAGE="docker.io/library/postgres:16"
+POSTGRES_IMAGE="docker.io/library/postgres:latest"
 MINIO_IMAGE="quay.io/minio/minio:latest"
-NGINX_IMAGE="docker.io/library/nginx:1.27"
+NGINX_IMAGE="docker.io/library/nginx:latest"
 
 # Ensure per-service env files exist
 for f in "$APP_ENV_FILE" "$POSTGRES_ENV_FILE" "$MINIO_ENV_FILE" "$NGINX_ENV_FILE"; do
@@ -32,8 +32,11 @@ done
 while IFS='=' read -r key value; do
   [ -z "$key" ] && continue
   case "$key" in \#*) continue ;; esac
-  # Preserve quotes as literal if present
-  eval "export $key=$value"
+  case "$key" in [A-Z0-9_]*) ;; *) echo "Invalid var: $key" >&2; exit 1 ;; esac
+  # Strip optional surrounding double quotes
+  value="${value%\"}"
+  value="${value#\"}"
+  export "$key=$value"
 done < "$APP_ENV_FILE"
 
 # Required variables (fail fast if empty)
