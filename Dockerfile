@@ -1,30 +1,27 @@
 # Multi-stage Dockerfile for JobMatch Go application
 # Build stage
-FROM docker.io/library/golang:1.23 AS build
+FROM golang:latest AS build
 WORKDIR /app
 
 # Enable modules and copy go files
 COPY go.mod go.sum ./
-RUN go mod download
-
 COPY . .
 
 # Build binary (static)
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o jobmatch ./
+RUN go build -o jobmatch
 
 # Runtime stage
-FROM docker.io/library/alpine:3.20 AS runtime
+FROM alpine:latest AS runtime
 WORKDIR /app
 # Add minimal CA certs for outbound HTTPS (Google, OpenAI, etc.)
 RUN apk add --no-cache ca-certificates
 
 # Create non-root user
-RUN addgroup -S jobmatch && adduser -S jobmatch -G jobmatch
-
+RUN addgroup -g 1001 jobmatch && adduser -D -u 1001 -G jobmatch jobmatch
 # Copy binary and templates/assets
-COPY --from=build /app/jobmatch /app/jobmatch
-COPY --from=build /app/templates /app/templates
-COPY --from=build /app/assets /app/assets
+COPY --from=build /app/jobmatch ./jobmatch
+COPY --from=build /app/templates ./templates
+COPY --from=build /app/assets ./assets
 
 # Expose default server port
 EXPOSE 8080
