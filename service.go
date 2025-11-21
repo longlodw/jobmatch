@@ -337,6 +337,26 @@ func (s *Service) GetJobDetails(ctx context.Context, userID, jobID string) (stri
 	return jobContent, http.StatusOK, nil
 }
 
+func (s *Service) GetJob(ctx context.Context, userID, jobID string) (struct {
+	id          string
+	status      string
+	note        sql.NullString
+	lastUpdated sql.NullTime
+}, int, error) {
+	s.logger.Info("getting single job", zap.String("userID", userID), zap.String("jobID", jobID))
+	job, err := s.storage.SelectJob(ctx, userID, jobID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			s.logger.Error("job not found", zap.Error(err))
+			return job, http.StatusNotFound, err
+		}
+		s.logger.Error("failed to get job", zap.Error(err))
+		return job, http.StatusInternalServerError, err
+	}
+	s.logger.Info("job retrieved successfully", zap.String("userID", userID), zap.String("jobID", jobID))
+	return job, http.StatusOK, nil
+}
+
 func (s *Service) fetchJobsIfNeeded(ctx context.Context, drive IDrive, userID string) (int, error) {
 	s.logger.Info("checking if job fetch is needed", zap.String("userID", userID))
 	lastSearched, err := s.storage.SelectUserLastSearched(ctx, userID)

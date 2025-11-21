@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"html/template"
 	"log"
 	"net/http"
@@ -55,8 +56,51 @@ func verifyAndGetUserID(r *http.Request, googleOAuth IOAuth) (string, error) {
 
 // helper to render error fragment consistently
 func fragmentError(w http.ResponseWriter, tmpl *template.Template, status int, msg string) {
+	// Attempt to find logger in context (optional)
+	if l := zap.L(); l != nil { // using global logger if configured
+		l.Error("fragment error", zap.Int("status", status), zap.String("message", msg))
+	}
 	w.WriteHeader(status)
 	_ = tmpl.ExecuteTemplate(w, "error_fragment", struct{ Message string }{Message: msg})
+}
+
+// getIDTokenSubject retrieves idToken cookie and verifies it, returning subject.
+// It logs failures and distinguishes missing/invalid cookie uniformly as unauthorized.
+func getIDTokenSubject(r *http.Request, oauth IOAuth, logger *zap.Logger) (string, int, error) {
+	c, err := r.Cookie("idToken")
+	if err != nil {
+		logger.Info("idToken cookie retrieval failed", zap.Error(err))
+		return "", http.StatusUnauthorized, errors.New("unauthorized")
+	}
+	if c == nil || c.Value == "" {
+		logger.Info("idToken cookie missing or empty")
+		return "", http.StatusUnauthorized, errors.New("unauthorized")
+	}
+	idTok, verr := oauth.VerifyIDToken(r.Context(), c.Value)
+	if verr != nil {
+		logger.Info("idToken verification failed", zap.Error(verr))
+		return "", http.StatusUnauthorized, errors.New("unauthorized")
+	}
+	return idTok.Subject, http.StatusOK, nil
+}
+
+// dynamic errors
+func errMissing(field string) error { return &argError{msg: "missing " + field} }
+
+type argError struct{ msg string }
+
+func (e *argError) Error() string { return e.msg }
+
+// requireAuth wraps an htmx fragment handler requiring auth, injecting uid in context.
+func requireAuth(logger *zap.Logger, oauth IOAuth, tmpl *template.Template, handler func(http.ResponseWriter, *http.Request, string)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		uid, st, err := getIDTokenSubject(r, oauth, logger)
+		if err != nil {
+			fragmentError(w, tmpl, st, err.Error())
+			return
+		}
+		handler(w, r, uid)
+	}
 }
 
 func main() {
@@ -124,32 +168,14 @@ func main() {
 		filepath.Join("templates", "resumes.html"),
 		filepath.Join("templates", "settings.html"),
 		filepath.Join("templates", "partials_error.html"),
+		filepath.Join("templates", "partials_success.html"),
 	)
 	if err != nil {
 		log.Fatalf("template parse error: %v", err)
 	}
 
 	mux := http.NewServeMux()
-
-	// Simple CORS middleware for frontend dev
-	cors := func(next http.Handler) http.Handler {
-		allowedOrigin := os.Getenv("FRONTEND_ORIGIN")
-		if allowedOrigin == "" { // dev default
-			allowedOrigin = "http://localhost:5173"
-		}
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
-			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-			if r.Method == http.MethodOptions {
-				w.WriteHeader(http.StatusOK)
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
-	}
-
-	rootHandler := cors(mux)
+	rootHandler := mux
 
 	// static assets
 	mux.HandleFunc("/static/style.css", func(w http.ResponseWriter, r *http.Request) {
@@ -158,14 +184,8 @@ func main() {
 
 	// home page
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// check id token cookie
-		idTokCookie, _ := r.Cookie("idToken")
-		var userID string
-		if idTokCookie != nil {
-			if tok, err := googleOAuth.VerifyIDToken(r.Context(), idTokCookie.Value); err == nil {
-				userID = tok.Subject
-			}
-		}
+		// attempt to get user via idToken cookie (optional for home)
+		uid, _, _ := getIDTokenSubject(r, googleOAuth, logger)
 		// create CSRF token for UI (not for API)
 		csrfToken, err := generateCSRFToken()
 		if err == nil {
@@ -176,7 +196,7 @@ func main() {
 			Year          int
 			Error         string
 			CSRF          string
-		}{Authenticated: userID != "", Year: time.Now().Year(), CSRF: csrfToken}
+		}{Authenticated: uid != "", Year: time.Now().Year(), CSRF: csrfToken}
 		if err := tmpl.ExecuteTemplate(w, "base", data); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
@@ -184,9 +204,9 @@ func main() {
 
 	// login initiate (redirect user)
 	mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
-		authURL, _, err := service.Login(r.Context())
+		authURL, st, err := service.Login(r.Context())
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, err.Error(), st)
 			return
 		}
 		http.Redirect(w, r, authURL, http.StatusFound)
@@ -196,9 +216,9 @@ func main() {
 	mux.HandleFunc("/login/callback", func(w http.ResponseWriter, r *http.Request) {
 		state := r.URL.Query().Get("state")
 		code := r.URL.Query().Get("code")
-		idToken, _, err := service.LoginCallback(r.Context(), state, code)
+		idToken, st, err := service.LoginCallback(r.Context(), state, code)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			http.Error(w, err.Error(), st)
 			return
 		}
 		http.SetCookie(w, &http.Cookie{Name: "idToken", Value: idToken, Path: "/", HttpOnly: true, Secure: false, SameSite: http.SameSiteLaxMode})
@@ -220,56 +240,36 @@ func main() {
 	})
 
 	// jobs fragment (htmx)
-	mux.HandleFunc("/jobs", func(w http.ResponseWriter, r *http.Request) {
-		idTokCookie, _ := r.Cookie("idToken")
-		if idTokCookie == nil {
-			fragmentError(w, tmpl, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-		idTok, err := googleOAuth.VerifyIDToken(r.Context(), idTokCookie.Value)
-		if err != nil {
-			fragmentError(w, tmpl, http.StatusUnauthorized, "unauthorized")
-			return
-		}
+	mux.HandleFunc("/jobs", requireAuth(logger, googleOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
 		status := r.URL.Query().Get("status")
-		jobs, _, err := service.GetJobs(r.Context(), idTok.Subject, 0, status)
+		jobs, st2, err := service.GetJobs(r.Context(), uid, 0, status)
 		if err != nil {
-			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
+			fragmentError(w, tmpl, st2, err.Error())
 			return
 		}
 		data := struct{ Jobs any }{Jobs: jobs}
 		if err := tmpl.ExecuteTemplate(w, "jobs", data); err != nil {
 			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
 		}
-	})
+	}))
 
 	// job details fragment
-	mux.HandleFunc("/job/details", func(w http.ResponseWriter, r *http.Request) {
-		idTokCookie, _ := r.Cookie("idToken")
-		if idTokCookie == nil {
-			fragmentError(w, tmpl, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-		idTok, err := googleOAuth.VerifyIDToken(r.Context(), idTokCookie.Value)
-		if err != nil {
-			fragmentError(w, tmpl, http.StatusUnauthorized, "unauthorized")
-			return
-		}
+	mux.HandleFunc("/job/details", requireAuth(logger, googleOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
 		jobID := r.URL.Query().Get("id")
 		if jobID == "" {
 			fragmentError(w, tmpl, http.StatusBadRequest, "missing id")
 			return
 		}
-		content, _, err := service.GetJobDetails(r.Context(), idTok.Subject, jobID)
+		content, st2, err := service.GetJobDetails(r.Context(), uid, jobID)
 		if err != nil {
-			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
+			fragmentError(w, tmpl, st2, err.Error())
 			return
 		}
 		data := struct{ JobID, Content string }{JobID: jobID, Content: content}
 		if err := tmpl.ExecuteTemplate(w, "job_details", data); err != nil {
 			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
 		}
-	})
+	}))
 
 	// close details fragment
 	mux.HandleFunc("/job/details/close", func(w http.ResponseWriter, r *http.Request) {
@@ -278,25 +278,15 @@ func main() {
 	})
 
 	// edit note fragment
-	mux.HandleFunc("/job/note/edit", func(w http.ResponseWriter, r *http.Request) {
-		idTokCookie, _ := r.Cookie("idToken")
-		if idTokCookie == nil {
-			fragmentError(w, tmpl, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-		idTok, err := googleOAuth.VerifyIDToken(r.Context(), idTokCookie.Value)
-		if err != nil {
-			fragmentError(w, tmpl, http.StatusUnauthorized, "unauthorized")
-			return
-		}
+	mux.HandleFunc("/job/note/edit", requireAuth(logger, googleOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
 		jobID := r.URL.Query().Get("jobID")
 		if jobID == "" {
 			fragmentError(w, tmpl, http.StatusBadRequest, "missing jobID")
 			return
 		}
-		job, err := storage.SelectJob(r.Context(), idTok.Subject, jobID)
+		job, st2, err := service.GetJob(r.Context(), uid, jobID)
 		if err != nil {
-			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
+			fragmentError(w, tmpl, st2, err.Error())
 			return
 		}
 		data := struct{ JobID, Current string }{JobID: jobID, Current: ""}
@@ -306,28 +296,18 @@ func main() {
 		if err := tmpl.ExecuteTemplate(w, "note_edit", data); err != nil {
 			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
 		}
-	})
+	}))
 
-	// cancel note edit returns original note display via template
-	mux.HandleFunc("/job/note/cancel", func(w http.ResponseWriter, r *http.Request) {
-		idTokCookie, _ := r.Cookie("idToken")
-		if idTokCookie == nil {
-			fragmentError(w, tmpl, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-		idTok, err := googleOAuth.VerifyIDToken(r.Context(), idTokCookie.Value)
-		if err != nil {
-			fragmentError(w, tmpl, http.StatusUnauthorized, "unauthorized")
-			return
-		}
+	// cancel note edit
+	mux.HandleFunc("/job/note/cancel", requireAuth(logger, googleOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
 		jobID := r.URL.Query().Get("jobID")
 		if jobID == "" {
 			fragmentError(w, tmpl, http.StatusBadRequest, "missing jobID")
 			return
 		}
-		job, err := storage.SelectJob(r.Context(), idTok.Subject, jobID)
+		job, st2, err := service.GetJob(r.Context(), uid, jobID)
 		if err != nil {
-			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
+			fragmentError(w, tmpl, st2, err.Error())
 			return
 		}
 		noteText := "No notes yet"
@@ -338,26 +318,16 @@ func main() {
 		if err := tmpl.ExecuteTemplate(w, "note_fragment", data); err != nil {
 			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
 		}
-	})
+	}))
 
 	// save note (htmx)
-	mux.HandleFunc("/job/note/save", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/job/note/save", requireAuth(logger, googleOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
 		if r.Method != http.MethodPost {
 			fragmentError(w, tmpl, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 		if !validateCSRF(r) {
 			fragmentError(w, tmpl, http.StatusForbidden, "bad csrf")
-			return
-		}
-		idTokCookie, _ := r.Cookie("idToken")
-		if idTokCookie == nil {
-			fragmentError(w, tmpl, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-		idTok, err := googleOAuth.VerifyIDToken(r.Context(), idTokCookie.Value)
-		if err != nil {
-			fragmentError(w, tmpl, http.StatusUnauthorized, "unauthorized")
 			return
 		}
 		if err := r.ParseForm(); err != nil {
@@ -370,10 +340,12 @@ func main() {
 			fragmentError(w, tmpl, http.StatusBadRequest, "missing jobID")
 			return
 		}
-		if _, err := service.UpdateJobNote(r.Context(), idTok.Subject, jobID, note); err != nil {
-			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
+		if st2, err := service.UpdateJobNote(r.Context(), uid, jobID, note); err != nil {
+			logger.Error("update job note failed", zap.Error(err), zap.String("jobID", jobID), zap.String("uid", uid))
+			fragmentError(w, tmpl, st2, err.Error())
 			return
 		}
+		logger.Info("job note updated", zap.String("jobID", jobID), zap.String("uid", uid))
 		if note == "" {
 			note = "No notes yet"
 		}
@@ -381,26 +353,16 @@ func main() {
 		if err := tmpl.ExecuteTemplate(w, "note_fragment", data); err != nil {
 			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
 		}
-	})
+	}))
 
 	// update job status (htmx)
-	mux.HandleFunc("/job/status", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/job/status", requireAuth(logger, googleOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
 		if r.Method != http.MethodPost {
 			fragmentError(w, tmpl, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 		if !validateCSRF(r) {
 			fragmentError(w, tmpl, http.StatusForbidden, "bad csrf")
-			return
-		}
-		idTokCookie, _ := r.Cookie("idToken")
-		if idTokCookie == nil {
-			fragmentError(w, tmpl, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-		idTok, err := googleOAuth.VerifyIDToken(r.Context(), idTokCookie.Value)
-		if err != nil {
-			fragmentError(w, tmpl, http.StatusUnauthorized, "unauthorized")
 			return
 		}
 		if err := r.ParseForm(); err != nil {
@@ -413,32 +375,26 @@ func main() {
 			fragmentError(w, tmpl, http.StatusBadRequest, "missing jobID/status")
 			return
 		}
-		if _, err := service.UpdateJobStatus(r.Context(), idTok.Subject, jobID, status); err != nil {
-			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
+		if st2, err := service.UpdateJobStatus(r.Context(), uid, jobID, status); err != nil {
+			logger.Error("update job status failed", zap.Error(err), zap.String("jobID", jobID), zap.String("uid", uid), zap.String("status", status))
+			fragmentError(w, tmpl, st2, err.Error())
 			return
 		}
-		// re-fetch job for updated fields
-		job, err := storage.SelectJob(r.Context(), idTok.Subject, jobID)
+		logger.Info("job status updated", zap.String("jobID", jobID), zap.String("uid", uid), zap.String("status", status))
+		job, st3, err := service.GetJob(r.Context(), uid, jobID)
 		if err != nil {
-			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
+			fragmentError(w, tmpl, st3, err.Error())
 			return
 		}
-		// reuse single card template
 		if err := tmpl.ExecuteTemplate(w, "job_card", job); err != nil {
 			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
 			return
 		}
-	})
+	}))
 
 	// resumes fragment
 	mux.HandleFunc("/resumes", func(w http.ResponseWriter, r *http.Request) {
-		idTokCookie, _ := r.Cookie("idToken")
-		var uid string
-		if idTokCookie != nil {
-			if tok, err := googleOAuth.VerifyIDToken(r.Context(), idTokCookie.Value); err == nil {
-				uid = tok.Subject
-			}
-		}
+		uid, _, _ := getIDTokenSubject(r, googleOAuth, logger) // optional
 		var resumes any
 		if uid != "" {
 			res, _, err := service.GetResumes(r.Context(), uid, 0)
@@ -457,24 +413,14 @@ func main() {
 		}
 	})
 
-	// upload resume fragment target
-	mux.HandleFunc("/resumes/upload", func(w http.ResponseWriter, r *http.Request) {
+	// upload resume (htmx target)
+	mux.HandleFunc("/resumes/upload", requireAuth(logger, googleOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
 		if r.Method != http.MethodPost {
 			fragmentError(w, tmpl, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 		if !validateCSRF(r) {
 			fragmentError(w, tmpl, http.StatusForbidden, "bad csrf")
-			return
-		}
-		idTokCookie, _ := r.Cookie("idToken")
-		if idTokCookie == nil {
-			fragmentError(w, tmpl, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-		idTok, err := googleOAuth.VerifyIDToken(r.Context(), idTokCookie.Value)
-		if err != nil {
-			fragmentError(w, tmpl, http.StatusUnauthorized, "unauthorized")
 			return
 		}
 		if err := r.ParseForm(); err != nil {
@@ -486,26 +432,25 @@ func main() {
 			fragmentError(w, tmpl, http.StatusBadRequest, "missing fileID")
 			return
 		}
-		if _, err := service.UploadResume(r.Context(), idTok.Subject, fileID); err != nil {
+		if _, err := service.UploadResume(r.Context(), uid, fileID); err != nil {
+			logger.Error("resume upload failed", zap.Error(err), zap.String("fileID", fileID), zap.String("uid", uid))
 			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
 			return
 		}
-		w.Write([]byte("Uploaded."))
-	})
+		logger.Info("resume uploaded", zap.String("fileID", fileID), zap.String("uid", uid))
+		if err := tmpl.ExecuteTemplate(w, "success_fragment", struct{ Message string }{Message: "Resume uploaded."}); err != nil {
+			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
+		}
+	}))
 
-	// settings fragment (require CSRF token for access as requested)
+	// settings fragment (CSRF required even on GET)
 	mux.HandleFunc("/settings", func(w http.ResponseWriter, r *http.Request) {
-		if !validateCSRF(r) { // enforce even on GET htmx request
+		if !validateCSRF(r) {
 			fragmentError(w, tmpl, http.StatusForbidden, "bad csrf")
 			return
 		}
-		idTokCookie, _ := r.Cookie("idToken")
-		var uid, searchURL string
-		if idTokCookie != nil {
-			if tok, err := googleOAuth.VerifyIDToken(r.Context(), idTokCookie.Value); err == nil {
-				uid = tok.Subject
-			}
-		}
+		uid, _, _ := getIDTokenSubject(r, googleOAuth, logger) // optional
+		var searchURL string
 		if uid != "" {
 			url, _, err := service.GetSearchURL(r.Context(), uid)
 			if err == nil {
@@ -522,67 +467,53 @@ func main() {
 	})
 
 	// settings save search URL
-	mux.HandleFunc("/settings/search", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/settings/search", requireAuth(logger, googleOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			fragmentError(w, tmpl, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		if !validateCSRF(r) {
-			http.Error(w, "bad csrf", http.StatusForbidden)
-			return
-		}
-		idTokCookie, _ := r.Cookie("idToken")
-		if idTokCookie == nil {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		idTok, err := googleOAuth.VerifyIDToken(r.Context(), idTokCookie.Value)
-		if err != nil {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		if err := r.ParseForm(); err != nil {
-			http.Error(w, "bad form", http.StatusBadRequest)
-			return
-		}
-		searchURL := r.Form.Get("searchURL")
-		if searchURL == "" {
-			http.Error(w, "missing searchURL", http.StatusBadRequest)
-			return
-		}
-		if _, err := service.SetSearchURL(r.Context(), idTok.Subject, searchURL); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Write([]byte("Saved."))
-	})
-
-	// settings enable drive (returns authorize link via template, require CSRF)
-	mux.HandleFunc("/settings/drive", func(w http.ResponseWriter, r *http.Request) {
 		if !validateCSRF(r) {
 			fragmentError(w, tmpl, http.StatusForbidden, "bad csrf")
 			return
 		}
-		idTokCookie, _ := r.Cookie("idToken")
-		if idTokCookie == nil {
-			fragmentError(w, tmpl, http.StatusUnauthorized, "unauthorized")
+		if err := r.ParseForm(); err != nil {
+			fragmentError(w, tmpl, http.StatusBadRequest, "bad form")
 			return
 		}
-		idTok, err := googleOAuth.VerifyIDToken(r.Context(), idTokCookie.Value)
-		if err != nil {
-			fragmentError(w, tmpl, http.StatusUnauthorized, "unauthorized")
+		searchURL := r.Form.Get("searchURL")
+		if searchURL == "" {
+			fragmentError(w, tmpl, http.StatusBadRequest, "missing searchURL")
 			return
 		}
-		authURL, _, err := service.EnableDrive(r.Context(), idTok.Subject)
-		if err != nil {
+		if st2, err := service.SetSearchURL(r.Context(), uid, searchURL); err != nil {
+			logger.Error("save search URL failed", zap.Error(err), zap.String("uid", uid))
+			fragmentError(w, tmpl, st2, err.Error())
+			return
+		}
+		logger.Info("search URL saved", zap.String("uid", uid))
+		if err := tmpl.ExecuteTemplate(w, "success_fragment", struct{ Message string }{Message: "Search URL saved."}); err != nil {
 			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
+		}
+	}))
+
+	// settings enable drive (returns authorize link via template, require CSRF)
+	mux.HandleFunc("/settings/drive", requireAuth(logger, googleOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
+		if !validateCSRF(r) {
+			fragmentError(w, tmpl, http.StatusForbidden, "bad csrf")
 			return
 		}
+		authURL, st2, err := service.EnableDrive(r.Context(), uid)
+		if err != nil {
+			logger.Error("enable drive failed", zap.Error(err), zap.String("uid", uid))
+			fragmentError(w, tmpl, st2, err.Error())
+			return
+		}
+		logger.Info("drive enable initiated", zap.String("uid", uid))
 		data := struct{ AuthURL string }{AuthURL: authURL}
 		if err := tmpl.ExecuteTemplate(w, "drive_authorize", data); err != nil {
 			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
 		}
-	})
+	}))
 
 	// JSON API endpoints
 	mux.HandleFunc("/api/login", func(w http.ResponseWriter, r *http.Request) {
@@ -729,10 +660,7 @@ func main() {
 			writeJSON(w, http.StatusUnauthorized, nil, verr)
 			return
 		}
-		var body struct {
-			JobID string `json:"jobID"`
-			Note  string `json:"note"`
-		}
+		var body struct{ JobID, Note string }
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		if body.JobID == "" {
 			writeJSON(w, http.StatusBadRequest, nil, errMissing("jobID"))
@@ -751,10 +679,7 @@ func main() {
 			writeJSON(w, http.StatusUnauthorized, nil, verr)
 			return
 		}
-		var body struct {
-			JobID  string `json:"jobID"`
-			Status string `json:"status"`
-		}
+		var body struct{ JobID, Status string }
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		if body.JobID == "" || body.Status == "" {
 			writeJSON(w, http.StatusBadRequest, nil, errMissing("jobID/status"))
@@ -800,10 +725,3 @@ func main() {
 	}
 	log.Println("server stopped")
 }
-
-// dynamic errors
-func errMissing(field string) error { return &argError{msg: "missing " + field} }
-
-type argError struct{ msg string }
-
-func (e *argError) Error() string { return e.msg }
