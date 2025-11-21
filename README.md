@@ -71,6 +71,16 @@ Optional variables with defaults:
 
 ## Quick Start
 
+### Building the Docker Image
+
+A multi-stage `Dockerfile` is provided. Build and run locally:
+```bash
+podman build -t localhost/jobmatch:latest .
+# or docker build -t jobmatch:latest .
+```
+The runtime image is a minimal Alpine with a non-root `jobmatch` user. Supply application variables at run time via `--env-file .env.app`.
+
+
 ## Podman Pod (Local Dev)
 
 A helper script `scripts/create_pod.sh` replaces the previous `podman-pod.yaml`. It creates an idempotent multi-container pod (Postgres, MinIO, Nginx cache proxy, app) using per-service env files: `.env.app`, `.env.postgres`, `.env.minio`, `.env.nginx`.
