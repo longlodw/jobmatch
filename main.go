@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"html/template"
-	"log"
+
 	"net/http"
 	"os"
 	"os/signal"
@@ -28,10 +28,12 @@ type apiResponse struct {
 func writeJSON(w http.ResponseWriter, status int, data any, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {
+		zap.L().Error("api error", zap.Int("status", status), zap.String("error", err.Error()))
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(apiResponse{Status: status, Error: err.Error()})
 		return
 	}
+	zap.L().Info("api success", zap.Int("status", status))
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(apiResponse{Status: status, Data: data})
 }
@@ -56,10 +58,7 @@ func verifyAndGetUserID(r *http.Request, googleOAuth IOAuth) (string, error) {
 
 // helper to render error fragment consistently
 func fragmentError(w http.ResponseWriter, tmpl *template.Template, status int, msg string) {
-	// Attempt to find logger in context (optional)
-	if l := zap.L(); l != nil { // using global logger if configured
-		l.Error("fragment error", zap.Int("status", status), zap.String("message", msg))
-	}
+	zap.L().Error("fragment error", zap.Int("status", status), zap.String("message", msg))
 	w.WriteHeader(status)
 	_ = tmpl.ExecuteTemplate(w, "error_fragment", struct{ Message string }{Message: msg})
 }
@@ -104,14 +103,18 @@ func requireAuth(logger *zap.Logger, oauth IOAuth, tmpl *template.Template, hand
 }
 
 func main() {
-	logger, _ := zap.NewProduction()
+	logger, err := zap.NewProduction()
+	if err != nil {
+		panic("failed to init logger: " + err.Error())
+	}
+	zap.ReplaceGlobals(logger)
 	defer logger.Sync()
 
 	// Load environment configuration (fail fast on required values)
 	getEnv := func(key string) string {
 		val := os.Getenv(key)
 		if val == "" {
-			log.Fatalf("missing env var: %s", key)
+			logger.Fatal("missing env var", zap.String("key", key))
 		}
 		return val
 	}
@@ -142,12 +145,12 @@ func main() {
 
 	googleOAuth, err := NewGoogleOAuth(ctx, clientID, clientSecret, redirectURL)
 	if err != nil {
-		log.Fatalf("failed to init google oauth: %v", err)
+		logger.Fatal("failed to init google oauth", zap.Error(err))
 	}
 
 	storage, err := NewStorage(ctx, pgConnStr, pgSecret, minioEndpoint, minioAccessKey, minioSecretKey, minioBucket, false)
 	if err != nil {
-		log.Fatalf("failed to init storage: %v", err)
+		logger.Fatal("failed to init storage", zap.Error(err))
 	}
 	defer storage.Close()
 
@@ -171,7 +174,7 @@ func main() {
 		filepath.Join("templates", "partials_success.html"),
 	)
 	if err != nil {
-		log.Fatalf("template parse error: %v", err)
+		logger.Fatal("template parse error", zap.Error(err))
 	}
 
 	mux := http.NewServeMux()
@@ -711,17 +714,17 @@ func main() {
 	shutdownCh := make(chan os.Signal, 1)
 	signal.Notify(shutdownCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
-		log.Printf("starting server on %s", serverAddr)
+		logger.Info("starting server", zap.String("addr", serverAddr))
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server failed: %v", err)
+			logger.Fatal("server failed", zap.Error(err))
 		}
 	}()
 	<-shutdownCh
-	log.Println("shutdown signal received")
+	logger.Info("shutdown signal received")
 	ctxShutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := server.Shutdown(ctxShutdown); err != nil {
-		log.Printf("graceful shutdown failed: %v", err)
+		logger.Error("graceful shutdown failed", zap.Error(err))
 	}
-	log.Println("server stopped")
+	logger.Info("server stopped")
 }
