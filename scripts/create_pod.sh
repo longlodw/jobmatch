@@ -62,7 +62,7 @@ else
 fi
 
 # Create volumes directories (host paths) if not present
-HOST_BASE="/var/lib/podman_volumes/jobmatch"
+HOST_BASE="${REPO_DIR}/pod_data"
 mkdir -p "${HOST_BASE}/postgres" "${HOST_BASE}/minio" "${HOST_BASE}/nginx/cache"
 
 # Launch Postgres
@@ -131,10 +131,13 @@ else
   echo "nginx-jobfetcher-cache container already exists"
 fi
 
-# Ensure app image present (user must build beforehand)
+# Ensure app image present (auto-build if absent)
 if ! podman image exists "$APP_IMAGE"; then
-  echo "App image ${APP_IMAGE} not found. Build it first with: podman build -t ${APP_IMAGE} ." >&2
-  exit 1
+  echo "App image ${APP_IMAGE} not found. Building..." >&2
+  if ! podman build -t "${APP_IMAGE}" "${REPO_DIR}"; then
+    echo "Failed to build image ${APP_IMAGE}" >&2
+    exit 1
+  fi
 fi
 
 # Launch application
