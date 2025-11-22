@@ -9,8 +9,12 @@
     </form>
     <div id="searchStatus" class="help">Current: {{if .SearchURL}}{{.SearchURL}}{{else}}(none){{end}}</div>
     <div style="margin-top:18px">
+      {{if .DriveEnabled}}
+      <div class="help" id="driveStatus">Google Drive is enabled.</div>
+      {{else}}
       <button hx-get="/settings/drive" hx-target="#driveStatus" hx-swap="innerHTML" class="ghost">Enable Google Drive</button>
       <div id="driveStatus" class="help" style="margin-top:8px"></div>
+      {{end}}
     </div>
     {{else}}
       <div class="help">Login to configure settings.</div>
