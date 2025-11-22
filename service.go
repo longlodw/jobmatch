@@ -16,7 +16,8 @@ import (
 )
 
 type Service struct {
-	googleOAuth    IOAuth
+	loginOAuth     IOAuth
+	driveOAuth     IOAuth
 	storage        IStorage
 	jobFetcher     IJobFetcher
 	embedder       IEmbedder
@@ -24,9 +25,10 @@ type Service struct {
 	logger         *zap.Logger
 }
 
-func NewService(googleOAuth IOAuth, storage IStorage, jobFetcher IJobFetcher, embedder IEmbedder, rootFolderName string, logger *zap.Logger) *Service {
+func NewService(loginOAuth, driveOAuth IOAuth, storage IStorage, jobFetcher IJobFetcher, embedder IEmbedder, rootFolderName string, logger *zap.Logger) *Service {
 	return &Service{
-		googleOAuth:    googleOAuth,
+		loginOAuth:     loginOAuth,
+		driveOAuth:     driveOAuth,
 		storage:        storage,
 		jobFetcher:     jobFetcher,
 		embedder:       embedder,
@@ -38,7 +40,7 @@ func NewService(googleOAuth IOAuth, storage IStorage, jobFetcher IJobFetcher, em
 func (s *Service) Login(ctx context.Context) (authUrl string, httpStatus int, err error) {
 	s.logger.Info("initiating login")
 	scopes := []string{"openid"}
-	authUrl, state, codeVerifier, codeChallenge, err := s.googleOAuth.Initiate(scopes)
+	authUrl, state, codeVerifier, codeChallenge, err := s.loginOAuth.Initiate(scopes)
 	if err != nil {
 		s.logger.Error("failed to initiate login", zap.Error(err))
 		return "", http.StatusInternalServerError, err
@@ -64,7 +66,7 @@ func (s *Service) LoginCallback(ctx context.Context, state, code string) (idToke
 		s.logger.Error("failed to get code verifier", zap.Error(err))
 		return "", http.StatusBadRequest, err
 	}
-	token, err := s.googleOAuth.Exchange(ctx, code, codeVerifier)
+	token, err := s.loginOAuth.Exchange(ctx, code, codeVerifier)
 	if err != nil {
 		s.logger.Error("failed to exchange code for token", zap.Error(err))
 		return "", http.StatusBadRequest, err
@@ -74,7 +76,7 @@ func (s *Service) LoginCallback(ctx context.Context, state, code string) (idToke
 		s.logger.Error("failed to extract ID token", zap.Error(err))
 		return "", http.StatusBadRequest, err
 	}
-	verifiedIDToken, err := s.googleOAuth.VerifyIDToken(ctx, idToken)
+	verifiedIDToken, err := s.loginOAuth.VerifyIDToken(ctx, idToken)
 	if err != nil {
 		s.logger.Error("failed to verify ID token", zap.Error(err))
 		return "", http.StatusBadRequest, err
@@ -96,7 +98,7 @@ func (s *Service) RefreshToken(ctx context.Context, userID string) (newIDToken s
 		s.logger.Error("failed to get refresh token", zap.Error(err))
 		return "", http.StatusInternalServerError, err
 	}
-	newToken, err := s.googleOAuth.Refresh(ctx, refreshToken)
+	newToken, err := s.loginOAuth.Refresh(ctx, refreshToken)
 	if err != nil {
 		s.logger.Error("failed to refresh token", zap.Error(err))
 		return "", http.StatusInternalServerError, err
@@ -109,7 +111,7 @@ func (s *Service) RefreshToken(ctx context.Context, userID string) (newIDToken s
 func (s *Service) EnableDrive(ctx context.Context, userID string) (authUrl string, httpStatus int, err error) {
 	s.logger.Info("initiating Google Drive enable", zap.String("userID", userID))
 	scopes := []string{"https://www.googleapis.com/auth/drive.file"}
-	authUrl, state, codeVerifier, codeChallenge, err := s.googleOAuth.Initiate(scopes)
+	authUrl, state, codeVerifier, codeChallenge, err := s.driveOAuth.Initiate(scopes)
 	if err != nil {
 		s.logger.Error("failed to initiate Google Drive enable", zap.Error(err))
 		return "", http.StatusInternalServerError, err
@@ -135,7 +137,7 @@ func (s *Service) EnableDriveCallback(ctx context.Context, userID, state, code s
 		s.logger.Error("failed to get code verifier", zap.Error(err))
 		return http.StatusBadRequest, err
 	}
-	token, err := s.googleOAuth.Exchange(ctx, code, codeVerifier)
+	token, err := s.driveOAuth.Exchange(ctx, code, codeVerifier)
 	if err != nil {
 		s.logger.Error("failed to exchange code for token", zap.Error(err))
 		return http.StatusBadRequest, err
@@ -480,7 +482,7 @@ func (s *Service) driveForUser(ctx context.Context, userID string) (IDrive, int,
 	}
 	// if expiry invalid or expired and we have refresh token, refresh
 	if (expiry.Valid && time.Now().After(expiry.Time)) && refresh != "" {
-		newTok, err := s.googleOAuth.Refresh(ctx, refresh)
+		newTok, err := s.loginOAuth.Refresh(ctx, refresh)
 		if err != nil {
 			return nil, http.StatusInternalServerError, err
 		}

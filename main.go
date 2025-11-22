@@ -121,7 +121,8 @@ func main() {
 
 	clientID := getEnv("GOOGLE_CLIENT_ID")
 	clientSecret := getEnv("GOOGLE_CLIENT_SECRET")
-	redirectURL := getEnv("GOOGLE_REDIRECT_URL")
+	loginRedirectURL := getEnv("LOGIN_REDIRECT_URL")
+	driveRedirectURL := getEnv("DRIVE_REDIRECT_URL")
 	pgConnStr := getEnv("PG_CONN_STR")
 	pgSecret := getEnv("PG_SECRET")
 	minioEndpoint := getEnv("MINIO_ENDPOINT")
@@ -143,10 +144,11 @@ func main() {
 
 	ctx := context.Background()
 
-	googleOAuth, err := NewGoogleOAuth(ctx, clientID, clientSecret, redirectURL)
+	loginOAuth, err := NewGoogleOAuth(ctx, clientID, clientSecret, loginRedirectURL)
 	if err != nil {
 		logger.Fatal("failed to init google oauth", zap.Error(err))
 	}
+	driveOAuth, err := NewGoogleOAuth(ctx, clientID, clientSecret, driveRedirectURL)
 
 	storage, err := NewStorage(ctx, pgConnStr, pgSecret, minioEndpoint, minioAccessKey, minioSecretKey, minioBucket, false)
 	if err != nil {
@@ -157,7 +159,7 @@ func main() {
 	jobFetcher := NewJobFetcher(jobFetcherURL, jobFetcherToken)
 	embedder := NewEmbeder(embedBaseURL, embedAPIKey)
 
-	service := NewService(googleOAuth, storage, jobFetcher, embedder, rootFolderName, logger)
+	service := NewService(loginOAuth, driveOAuth, storage, jobFetcher, embedder, rootFolderName, logger)
 
 	// parse templates (include all fragments)
 	tmpl, err := template.ParseFiles(
@@ -188,7 +190,7 @@ func main() {
 	// home page
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// attempt to get user via idToken cookie (optional for home)
-		uid, _, _ := getIDTokenSubject(r, googleOAuth, logger)
+		uid, _, _ := getIDTokenSubject(r, loginOAuth, logger)
 		// create CSRF token for UI (not for API)
 		csrfToken, err := generateCSRFToken()
 		if err == nil {
@@ -243,7 +245,7 @@ func main() {
 	})
 
 	// jobs fragment (htmx)
-	mux.HandleFunc("/jobs", requireAuth(logger, googleOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
+	mux.HandleFunc("/jobs", requireAuth(logger, loginOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
 		status := r.URL.Query().Get("status")
 		jobs, st2, err := service.GetJobs(r.Context(), uid, 0, status)
 		if err != nil {
@@ -257,7 +259,7 @@ func main() {
 	}))
 
 	// job details fragment
-	mux.HandleFunc("/job/details", requireAuth(logger, googleOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
+	mux.HandleFunc("/job/details", requireAuth(logger, loginOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
 		jobID := r.URL.Query().Get("id")
 		if jobID == "" {
 			fragmentError(w, tmpl, http.StatusBadRequest, "missing id")
@@ -281,7 +283,7 @@ func main() {
 	})
 
 	// edit note fragment
-	mux.HandleFunc("/job/note/edit", requireAuth(logger, googleOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
+	mux.HandleFunc("/job/note/edit", requireAuth(logger, loginOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
 		jobID := r.URL.Query().Get("jobID")
 		if jobID == "" {
 			fragmentError(w, tmpl, http.StatusBadRequest, "missing jobID")
@@ -302,7 +304,7 @@ func main() {
 	}))
 
 	// cancel note edit
-	mux.HandleFunc("/job/note/cancel", requireAuth(logger, googleOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
+	mux.HandleFunc("/job/note/cancel", requireAuth(logger, loginOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
 		jobID := r.URL.Query().Get("jobID")
 		if jobID == "" {
 			fragmentError(w, tmpl, http.StatusBadRequest, "missing jobID")
@@ -324,7 +326,7 @@ func main() {
 	}))
 
 	// save note (htmx)
-	mux.HandleFunc("/job/note/save", requireAuth(logger, googleOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
+	mux.HandleFunc("/job/note/save", requireAuth(logger, loginOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
 		if r.Method != http.MethodPost {
 			fragmentError(w, tmpl, http.StatusMethodNotAllowed, "method not allowed")
 			return
@@ -359,7 +361,7 @@ func main() {
 	}))
 
 	// update job status (htmx)
-	mux.HandleFunc("/job/status", requireAuth(logger, googleOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
+	mux.HandleFunc("/job/status", requireAuth(logger, loginOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
 		if r.Method != http.MethodPost {
 			fragmentError(w, tmpl, http.StatusMethodNotAllowed, "method not allowed")
 			return
@@ -397,7 +399,7 @@ func main() {
 
 	// resumes fragment
 	mux.HandleFunc("/resumes", func(w http.ResponseWriter, r *http.Request) {
-		uid, _, _ := getIDTokenSubject(r, googleOAuth, logger) // optional
+		uid, _, _ := getIDTokenSubject(r, loginOAuth, logger) // optional
 		var resumes any
 		if uid != "" {
 			res, _, err := service.GetResumes(r.Context(), uid, 0)
@@ -417,7 +419,7 @@ func main() {
 	})
 
 	// upload resume (htmx target)
-	mux.HandleFunc("/resumes/upload", requireAuth(logger, googleOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
+	mux.HandleFunc("/resumes/upload", requireAuth(logger, loginOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
 		if r.Method != http.MethodPost {
 			fragmentError(w, tmpl, http.StatusMethodNotAllowed, "method not allowed")
 			return
@@ -452,7 +454,7 @@ func main() {
 			fragmentError(w, tmpl, http.StatusForbidden, "bad csrf")
 			return
 		}
-		uid, _, _ := getIDTokenSubject(r, googleOAuth, logger) // optional
+		uid, _, _ := getIDTokenSubject(r, loginOAuth, logger) // optional
 		var searchURL string
 		if uid != "" {
 			url, _, err := service.GetSearchURL(r.Context(), uid)
@@ -470,7 +472,7 @@ func main() {
 	})
 
 	// settings save search URL
-	mux.HandleFunc("/settings/search", requireAuth(logger, googleOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
+	mux.HandleFunc("/settings/search", requireAuth(logger, loginOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
 		if r.Method != http.MethodPost {
 			fragmentError(w, tmpl, http.StatusMethodNotAllowed, "method not allowed")
 			return
@@ -500,7 +502,7 @@ func main() {
 	}))
 
 	// settings enable drive (returns authorize link via template, require CSRF)
-	mux.HandleFunc("/settings/drive", requireAuth(logger, googleOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
+	mux.HandleFunc("/settings/drive", requireAuth(logger, loginOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
 		if !validateCSRF(r) {
 			fragmentError(w, tmpl, http.StatusForbidden, "bad csrf")
 			return
@@ -542,7 +544,7 @@ func main() {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		uid, verr := verifyAndGetUserID(r, googleOAuth)
+		uid, verr := verifyAndGetUserID(r, loginOAuth)
 		if verr != nil {
 			writeJSON(w, http.StatusUnauthorized, nil, verr)
 			return
@@ -555,7 +557,7 @@ func main() {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		uid, verr := verifyAndGetUserID(r, googleOAuth)
+		uid, verr := verifyAndGetUserID(r, loginOAuth)
 		if verr != nil {
 			writeJSON(w, http.StatusUnauthorized, nil, verr)
 			return
@@ -568,7 +570,7 @@ func main() {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		uid, verr := verifyAndGetUserID(r, googleOAuth)
+		uid, verr := verifyAndGetUserID(r, loginOAuth)
 		if verr != nil {
 			writeJSON(w, http.StatusUnauthorized, nil, verr)
 			return
@@ -579,7 +581,7 @@ func main() {
 		writeJSON(w, st, map[string]string{"status": "drive_enabled"}, err)
 	})
 	mux.HandleFunc("/api/search-url", func(w http.ResponseWriter, r *http.Request) {
-		uid, verr := verifyAndGetUserID(r, googleOAuth)
+		uid, verr := verifyAndGetUserID(r, loginOAuth)
 		if verr != nil {
 			writeJSON(w, http.StatusUnauthorized, nil, verr)
 			return
@@ -608,7 +610,7 @@ func main() {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		uid, verr := verifyAndGetUserID(r, googleOAuth)
+		uid, verr := verifyAndGetUserID(r, loginOAuth)
 		if verr != nil {
 			writeJSON(w, http.StatusUnauthorized, nil, verr)
 			return
@@ -622,7 +624,7 @@ func main() {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		uid, verr := verifyAndGetUserID(r, googleOAuth)
+		uid, verr := verifyAndGetUserID(r, loginOAuth)
 		if verr != nil {
 			writeJSON(w, http.StatusUnauthorized, nil, verr)
 			return
@@ -643,7 +645,7 @@ func main() {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		uid, verr := verifyAndGetUserID(r, googleOAuth)
+		uid, verr := verifyAndGetUserID(r, loginOAuth)
 		if verr != nil {
 			writeJSON(w, http.StatusUnauthorized, nil, verr)
 			return
@@ -658,7 +660,7 @@ func main() {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		uid, verr := verifyAndGetUserID(r, googleOAuth)
+		uid, verr := verifyAndGetUserID(r, loginOAuth)
 		if verr != nil {
 			writeJSON(w, http.StatusUnauthorized, nil, verr)
 			return
@@ -677,7 +679,7 @@ func main() {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		uid, verr := verifyAndGetUserID(r, googleOAuth)
+		uid, verr := verifyAndGetUserID(r, loginOAuth)
 		if verr != nil {
 			writeJSON(w, http.StatusUnauthorized, nil, verr)
 			return
@@ -696,7 +698,7 @@ func main() {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		uid, verr := verifyAndGetUserID(r, googleOAuth)
+		uid, verr := verifyAndGetUserID(r, loginOAuth)
 		if verr != nil {
 			writeJSON(w, http.StatusUnauthorized, nil, verr)
 			return

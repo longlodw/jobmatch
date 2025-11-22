@@ -68,10 +68,11 @@ mkdir -p "${HOST_BASE}/postgres" "${HOST_BASE}/minio" "${HOST_BASE}/nginx/cache"
 # Launch Postgres
 if ! podman container exists postgres || ! podman container inspect postgres >/dev/null 2>&1; then
   echo "Starting postgres container"
+  # Postgres 18+ expects a single mount at /var/lib/postgresql (it will create versioned subdir)
   podman run -d --restart=always --pod "${POD_NAME}" \
     --name postgres \
     --env-file "${POSTGRES_ENV_FILE}" \
-    -v "${HOST_BASE}/postgres:/var/lib/postgresql/data" \
+    -v "${HOST_BASE}/postgres:/var/lib/postgresql" \
     "${POSTGRES_IMAGE}"
 else
   echo "postgres container already exists"
@@ -96,9 +97,15 @@ NGINX_CONF_FILE="${NGINX_CONF_DIR}/nginx.conf"
 if [ ! -f "$NGINX_CONF_FILE" ]; then
   cat > "${NGINX_CONF_FILE}" <<'EOF'
 # Nginx reverse proxy + cache for remote job fetcher
-proxy_cache_path /cache levels=1:2 keys_zone=jobfetcher_cache:10m max_size=500m inactive=30m use_temp_path=off;
-events {}
+user  nginx;
+worker_processes  auto;
+error_log  /var/log/nginx/error.log warn;
+pid        /var/run/nginx.pid;
+
+events { worker_connections 1024; }
+
 http {
+  proxy_cache_path /cache levels=1:2 keys_zone=jobfetcher_cache:10m max_size=500m inactive=30m use_temp_path=off;
   server {
     listen 8081;
     # Adjust upstream origin below to the real job fetcher endpoint if not local

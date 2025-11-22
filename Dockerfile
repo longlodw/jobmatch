@@ -7,8 +7,9 @@ WORKDIR /app
 COPY go.mod go.sum ./
 COPY . .
 
-# Build binary (static)
-RUN go build -o jobmatch
+# Build binary (static, disable cgo for Alpine runtime)
+ENV CGO_ENABLED=0
+RUN go build -o jobmatch .
 
 # Runtime stage
 FROM alpine:latest AS runtime
