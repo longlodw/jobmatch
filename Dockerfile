@@ -32,7 +32,9 @@ USER jobmatch
 # Environment variables expected (supplied at runtime via --env-file)
 # GOOGLE_CLIENT_ID
 # GOOGLE_CLIENT_SECRET
-# GOOGLE_REDIRECT_URL
+# WEB_LOGIN_REDIRECT_URL (browser OAuth callback)
+# API_LOGIN_REDIRECT_URL (programmatic OAuth callback)
+# DRIVE_REDIRECT_URL
 # PG_CONN_STR
 # PG_SECRET
 # MINIO_ENDPOINT

@@ -52,7 +52,9 @@ The server fails fast if any required configuration is missing. Provide these be
 |----------|---------|
 | `GOOGLE_CLIENT_ID` | Google OAuth client ID |
 | `GOOGLE_CLIENT_SECRET` | Google OAuth client secret |
-| `GOOGLE_REDIRECT_URL` | OAuth redirect URI (must match console) |
+| `WEB_LOGIN_REDIRECT_URL` | OAuth redirect URI for browser login flow |
+| `API_LOGIN_REDIRECT_URL` | OAuth redirect URI for API/client login flow |
+| `DRIVE_REDIRECT_URL` | OAuth redirect URI for Drive enable callback |
 | `PG_CONN_STR` | Postgres connection string |
 | `PG_SECRET` | Encryption / key material for sensitive data |
 | `MINIO_ENDPOINT` | MinIO/S3 endpoint (host:port) |
@@ -120,6 +122,16 @@ rm -rf /var/lib/podman_volumes/jobmatch
    ```
 5. Navigate to `http://localhost:8080`.
 6. Log in with Google; interact with Jobs, Resumes, and Settings.
+
+## Migration Notes
+
+Redirect variable change: Prior versions used `LOGIN_REDIRECT_URL`. This has been replaced by two distinct variables:
+- `WEB_LOGIN_REDIRECT_URL` for browser (cookie) flow
+- `API_LOGIN_REDIRECT_URL` for programmatic (token in response) flow
+
+Update your Google Cloud OAuth client to include both redirect URIs. The old single URI must be migrated; otherwise web/API login will fail with a redirect mismatch.
+
+Infra container: When running the Podman pod via `scripts/create_pod.sh`, an infra container (Podman internal) is created automatically to hold the shared network namespace and published port mappings. `podman ps` will display the exposed host port (e.g. `0.0.0.0:8080->8080/tcp`) for every container row; the mapping exists only once at the pod level.
 
 ## Development Notes
 

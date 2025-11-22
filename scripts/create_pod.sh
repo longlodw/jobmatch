@@ -40,7 +40,7 @@ while IFS='=' read -r key value; do
 done < "$APP_ENV_FILE"
 
 # Required variables (fail fast if empty)
-required_vars="GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GOOGLE_REDIRECT_URL PG_CONN_STR PG_SECRET MINIO_ENDPOINT MINIO_ACCESS_KEY MINIO_SECRET_KEY MINIO_BUCKET JOB_FETCHER_URL JOB_FETCHER_TOKEN OPENAI_BASE_URL OPENAI_API_KEY"
+required_vars="GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET WEB_LOGIN_REDIRECT_URL API_LOGIN_REDIRECT_URL DRIVE_REDIRECT_URL PG_CONN_STR PG_SECRET MINIO_ENDPOINT MINIO_ACCESS_KEY MINIO_SECRET_KEY MINIO_BUCKET JOB_FETCHER_URL JOB_FETCHER_TOKEN OPENAI_BASE_URL OPENAI_API_KEY"
 missing=""
 for v in $required_vars; do
   eval val="\${$v:-}"
@@ -53,41 +53,56 @@ if [ -n "$missing" ]; then
   exit 1
 fi
 
-# Create pod if not exists
-if ! podman pod exists "$POD_NAME"; then
-  echo "Creating pod ${POD_NAME}"
-  podman pod create --name "${POD_NAME}" -p 8080:8080 -p 5432:5432 -p 9000:9000 -p 9001:9001 -p 8081:8081
+# Define app host port (only external exposure)
+APP_PORT="${APP_PORT:-8080}"
+RECREATE_POD="${RECREATE_POD:-}" # set to 1 to force pod recreation
+
+# Create or recreate pod with only app port exposed
+if podman pod exists "$POD_NAME"; then
+  if [ "$RECREATE_POD" = "1" ]; then
+    echo "Recreating pod ${POD_NAME} exposing app port ${APP_PORT}"
+    podman pod rm -f "$POD_NAME" >/dev/null 2>&1 || true
+    podman pod create --name "${POD_NAME}" -p "${APP_PORT}:8080"
+  else
+    echo "Pod ${POD_NAME} already exists (set RECREATE_POD=1 to rebuild with new app port)"
+  fi
 else
-  echo "Pod ${POD_NAME} already exists"
+  echo "Creating pod ${POD_NAME} exposing app port ${APP_PORT}"
+  podman pod create --name "${POD_NAME}" -p "${APP_PORT}:8080"
 fi
 
 # Create volumes directories (host paths) if not present
 HOST_BASE="${REPO_DIR}/pod_data"
 mkdir -p "${HOST_BASE}/postgres" "${HOST_BASE}/minio" "${HOST_BASE}/nginx/cache"
 
-# Launch Postgres
-if ! podman container exists postgres || ! podman container inspect postgres >/dev/null 2>&1; then
-  echo "Starting postgres container"
-  # Postgres 18+ expects a single mount at /var/lib/postgresql (it will create versioned subdir)
+# Launch Postgres (restart if existing but stopped)
+if [ "$(podman container exists postgres && podman inspect -f '{{.State.Running}}' postgres 2>/dev/null || echo false)" != "true" ]; then
+  echo "(Re)starting postgres container"
+  if podman container exists postgres; then
+    podman rm -f postgres >/dev/null 2>&1 || true
+  fi
   podman run -d --restart=always --pod "${POD_NAME}" \
     --name postgres \
     --env-file "${POSTGRES_ENV_FILE}" \
     -v "${HOST_BASE}/postgres:/var/lib/postgresql" \
     "${POSTGRES_IMAGE}"
 else
-  echo "postgres container already exists"
+  echo "postgres container already running"
 fi
 
-# Launch MinIO
-if ! podman container exists minio || ! podman container inspect minio >/dev/null 2>&1; then
-  echo "Starting minio container"
+# Launch MinIO (restart if existing but stopped)
+if [ "$(podman container exists minio && podman inspect -f '{{.State.Running}}' minio 2>/dev/null || echo false)" != "true" ]; then
+  echo "(Re)starting minio container"
+  if podman container exists minio; then
+    podman rm -f minio >/dev/null 2>&1 || true
+  fi
   podman run -d --restart=always --pod "${POD_NAME}" \
     --name minio \
     --env-file "${MINIO_ENV_FILE}" \
     -v "${HOST_BASE}/minio:/data" \
     "${MINIO_IMAGE}" server /data
 else
-  echo "minio container already exists"
+  echo "minio container already running"
 fi
 
 # Prepare nginx config (cache reverse proxy) in temp dir mapped into container
@@ -125,9 +140,12 @@ http {
 EOF
 fi
 
-# Launch Nginx cache proxy
-if ! podman container exists nginx-jobfetcher-cache || ! podman container inspect nginx-jobfetcher-cache >/dev/null 2>&1; then
-  echo "Starting nginx-jobfetcher-cache container"
+# Launch Nginx cache proxy (restart if existing but stopped)
+if [ "$(podman container exists nginx-jobfetcher-cache && podman inspect -f '{{.State.Running}}' nginx-jobfetcher-cache 2>/dev/null || echo false)" != "true" ]; then
+  echo "(Re)starting nginx-jobfetcher-cache container"
+  if podman container exists nginx-jobfetcher-cache; then
+    podman rm -f nginx-jobfetcher-cache >/dev/null 2>&1 || true
+  fi
   podman run -d --restart=always --pod "${POD_NAME}" \
     --name nginx-jobfetcher-cache \
     --env-file "${NGINX_ENV_FILE}" \
@@ -135,7 +153,7 @@ if ! podman container exists nginx-jobfetcher-cache || ! podman container inspec
     -v "${HOST_BASE}/nginx/cache:/cache" \
     "${NGINX_IMAGE}"
 else
-  echo "nginx-jobfetcher-cache container already exists"
+  echo "nginx-jobfetcher-cache container already running"
 fi
 
 # Ensure app image present (auto-build if absent)
@@ -147,16 +165,22 @@ if ! podman image exists "$APP_IMAGE"; then
   fi
 fi
 
-# Launch application
-if ! podman container exists jobmatch-app || ! podman container inspect jobmatch-app >/dev/null 2>&1; then
-  echo "Starting jobmatch app container"
+# Launch application (restart if existing but stopped)
+if [ "$(podman container exists jobmatch-app && podman inspect -f '{{.State.Running}}' jobmatch-app 2>/dev/null || echo false)" != "true" ]; then
+  echo "(Re)starting jobmatch app container"
+  if podman container exists jobmatch-app; then
+    podman rm -f jobmatch-app >/dev/null 2>&1 || true
+  fi
   podman run -d --restart=always --pod "${POD_NAME}" \
     --name jobmatch-app \
     --env-file "${APP_ENV_FILE}" \
     "${APP_IMAGE}"
 else
-  echo "jobmatch-app container already exists"
+  echo "jobmatch-app container already running"
 fi
 
-echo "Pod setup complete. Containers status:" 
+echo "Pod setup complete. Containers status (shared pod ports appear on each row):" 
 podman ps --filter "pod=${POD_NAME}" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+echo "\nExternal ports exposed:"
+podman port "${POD_NAME}" || true
+echo "\nNote: The host mapping 0.0.0.0:${APP_PORT}->8080/tcp belongs to the pod and is shown for every container. Other service ports (5432,9000,8081) are internal only (no host binding)."
