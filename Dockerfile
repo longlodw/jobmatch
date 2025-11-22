@@ -4,7 +4,7 @@ FROM golang:latest AS build
 WORKDIR /app
 
 # Enable modules and copy go files
-COPY go.mod go.sum ./
+COPY go.mod go.sum ./assets ./templates *.go
 COPY . .
 
 # Build binary (static, disable cgo for Alpine runtime)
