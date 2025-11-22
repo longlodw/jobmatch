@@ -40,17 +40,12 @@ func NewService(loginOAuth, driveOAuth IOAuth, storage IStorage, jobFetcher IJob
 func (s *Service) Login(ctx context.Context) (authUrl string, httpStatus int, err error) {
 	s.logger.Info("initiating login")
 	scopes := []string{"openid"}
-	authUrl, state, codeVerifier, codeChallenge, err := s.loginOAuth.Initiate(scopes)
+	authUrl, state, codeVerifier, err := s.loginOAuth.Initiate(scopes)
 	if err != nil {
 		s.logger.Error("failed to initiate login", zap.Error(err))
 		return "", http.StatusInternalServerError, err
 	}
-	err = s.storage.StoreState(ctx, state)
-	if err != nil {
-		s.logger.Error("failed to store state", zap.Error(err))
-		return "", http.StatusInternalServerError, err
-	}
-	err = s.storage.StoreCode(ctx, codeVerifier, codeChallenge)
+	err = s.storage.StoreCode(ctx, state, codeVerifier)
 	if err != nil {
 		s.logger.Error("failed to store code", zap.Error(err))
 		return "", http.StatusInternalServerError, err
@@ -61,10 +56,14 @@ func (s *Service) Login(ctx context.Context) (authUrl string, httpStatus int, er
 
 func (s *Service) LoginCallback(ctx context.Context, state, code string) (idToken string, httpStatus int, err error) {
 	s.logger.Info("handling login callback", zap.String("state", state), zap.String("code", code))
-	codeVerifier, err := s.storage.GetCode(ctx, code)
+	codeVerifier, isValid, err := s.storage.GetCode(ctx, state)
 	if err != nil {
 		s.logger.Error("failed to get code verifier", zap.Error(err))
 		return "", http.StatusBadRequest, err
+	}
+	if !isValid {
+		s.logger.Error("invalid state parameter")
+		return "", http.StatusBadRequest, errors.New("invalid state parameter")
 	}
 	token, err := s.loginOAuth.Exchange(ctx, code, codeVerifier)
 	if err != nil {
@@ -108,20 +107,35 @@ func (s *Service) RefreshToken(ctx context.Context, userID string) (newIDToken s
 	return newIDToken, http.StatusOK, nil
 }
 
+func (s *Service) HasDriveEnabled(ctx context.Context, userID string) (enabled bool, httpStatus int, err error) {
+	s.logger.Info("checking if Google Drive is enabled", zap.String("userID", userID))
+	accessToken, refreshToken, _, err := s.storage.SelectUserDriveTokens(ctx, userID)
+	if err != nil {
+		s.logger.Error("failed to get user drive tokens", zap.Error(err))
+		return false, http.StatusInternalServerError, err
+	}
+	enabled = accessToken != "" && refreshToken != ""
+	s.logger.Info("Google Drive enabled status retrieved", zap.String("userID", userID), zap.Bool("enabled", enabled))
+	return enabled, http.StatusOK, nil
+}
+
 func (s *Service) EnableDrive(ctx context.Context, userID string) (authUrl string, httpStatus int, err error) {
 	s.logger.Info("initiating Google Drive enable", zap.String("userID", userID))
-	scopes := []string{"https://www.googleapis.com/auth/drive.file"}
-	authUrl, state, codeVerifier, codeChallenge, err := s.driveOAuth.Initiate(scopes)
+	// Prevent re-enabling if already enabled
+	enabled, st, herr := s.HasDriveEnabled(ctx, userID)
+	if herr != nil {
+		return "", st, herr
+	}
+	if enabled {
+		return "", http.StatusBadRequest, errors.New("drive already enabled")
+	}
+	scopes := []string{"https://www.googleapis.com/auth/drive.file", "https://www.googleapis.com/auth/drive.readonly"}
+	authUrl, state, codeVerifier, err := s.driveOAuth.Initiate(scopes)
 	if err != nil {
 		s.logger.Error("failed to initiate Google Drive enable", zap.Error(err))
 		return "", http.StatusInternalServerError, err
 	}
-	err = s.storage.StoreState(ctx, state)
-	if err != nil {
-		s.logger.Error("failed to store state", zap.Error(err))
-		return "", http.StatusInternalServerError, err
-	}
-	err = s.storage.StoreCode(ctx, codeVerifier, codeChallenge)
+	err = s.storage.StoreCode(ctx, state, codeVerifier)
 	if err != nil {
 		s.logger.Error("failed to store code", zap.Error(err))
 		return "", http.StatusInternalServerError, err
@@ -132,10 +146,14 @@ func (s *Service) EnableDrive(ctx context.Context, userID string) (authUrl strin
 
 func (s *Service) EnableDriveCallback(ctx context.Context, userID, state, code string) (int, error) {
 	s.logger.Info("handling Google Drive enable callback", zap.String("userID", userID), zap.String("state", state), zap.String("code", code))
-	codeVerifier, err := s.storage.GetCode(ctx, code)
+	codeVerifier, isValid, err := s.storage.GetCode(ctx, state)
 	if err != nil {
 		s.logger.Error("failed to get code verifier", zap.Error(err))
 		return http.StatusBadRequest, err
+	}
+	if !isValid {
+		s.logger.Error("invalid state parameter")
+		return http.StatusBadRequest, errors.New("invalid state parameter")
 	}
 	token, err := s.driveOAuth.Exchange(ctx, code, codeVerifier)
 	if err != nil {

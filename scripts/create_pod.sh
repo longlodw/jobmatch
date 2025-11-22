@@ -4,7 +4,7 @@ set -eu
 # JobMatch Pod creation script using podman.
 # Loads environment variables from .env (key=value) file in repo root.
 # Creates pod 'jobmatch-pod' if it does not already exist, then launches
-# containers: postgres, minio, nginx-jobfetcher-cache, app.
+# containers: pgvector, minio, nginx-jobfetcher-cache, app.
 # Idempotent: skips creating containers if they already exist.
 
 REPO_DIR="$(cd "$(dirname "$0")"/.. && pwd)"
@@ -14,7 +14,7 @@ MINIO_ENV_FILE="${REPO_DIR}/.env.minio"
 NGINX_ENV_FILE="${REPO_DIR}/.env.nginx"
 POD_NAME="jobmatch-pod"
 APP_IMAGE="localhost/jobmatch:latest"
-POSTGRES_IMAGE="docker.io/library/postgres:latest"
+POSTGRES_IMAGE="docker.io/ankane/pgvector:latest"
 MINIO_IMAGE="quay.io/minio/minio:latest"
 NGINX_IMAGE="docker.io/library/nginx:latest"
 
@@ -40,7 +40,7 @@ while IFS='=' read -r key value; do
 done < "$APP_ENV_FILE"
 
 # Required variables (fail fast if empty)
-required_vars="GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET WEB_LOGIN_REDIRECT_URL API_LOGIN_REDIRECT_URL DRIVE_REDIRECT_URL PG_CONN_STR PG_SECRET MINIO_ENDPOINT MINIO_ACCESS_KEY MINIO_SECRET_KEY MINIO_BUCKET JOB_FETCHER_URL JOB_FETCHER_TOKEN OPENAI_BASE_URL OPENAI_API_KEY"
+required_vars="GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET WEB_LOGIN_REDIRECT_URL API_LOGIN_REDIRECT_URL API_DRIVE_REDIRECT_URL WEB_DRIVE_REDIRECT_URL PG_CONN_STR PG_SECRET MINIO_ENDPOINT MINIO_ACCESS_KEY MINIO_SECRET_KEY MINIO_BUCKET JOB_FETCHER_URL JOB_FETCHER_TOKEN OPENAI_BASE_URL OPENAI_API_KEY"
 missing=""
 for v in $required_vars; do
   eval val="\${$v:-}"
@@ -57,37 +57,58 @@ fi
 APP_PORT="${APP_PORT:-8080}"
 RECREATE_POD="${RECREATE_POD:-}" # set to 1 to force pod recreation
 
-# Create or recreate pod with only app port exposed
+# Create or recreate pod ensuring ONLY app port is exposed externally
 if podman pod exists "$POD_NAME"; then
+  existing_ports="$(podman port "$POD_NAME" 2>/dev/null || true)"
+  # Normalize by removing IPv6 duplicate lines
+  normalized_ports="$(echo "$existing_ports" | grep -v '^$' | sed '/\[::\]/d')"
+  expected_line="8080/tcp -> 0.0.0.0:${APP_PORT}"
+  needs_recreate=0
+  # RECREATE_POD override always forces recreation
   if [ "$RECREATE_POD" = "1" ]; then
-    echo "Recreating pod ${POD_NAME} exposing app port ${APP_PORT}"
+    needs_recreate=1
+  else
+    # If any port other than 8080/tcp is published OR host port differs, recreate
+    if echo "$normalized_ports" | grep -qv '^8080/tcp'; then
+      needs_recreate=1
+    elif ! echo "$normalized_ports" | grep -q "$expected_line"; then
+      needs_recreate=1
+    fi
+    # If multiple lines remain after normalization, recreate
+    count_lines="$(echo "$normalized_ports" | wc -l | tr -d ' ')"
+    if [ "$count_lines" -gt 1 ]; then
+      needs_recreate=1
+    fi
+  fi
+  if [ "$needs_recreate" -eq 1 ]; then
+    echo "Recreating pod ${POD_NAME} to enforce single exposed app port ${APP_PORT}"
     podman pod rm -f "$POD_NAME" >/dev/null 2>&1 || true
     podman pod create --name "${POD_NAME}" -p "${APP_PORT}:8080"
   else
-    echo "Pod ${POD_NAME} already exists (set RECREATE_POD=1 to rebuild with new app port)"
+    echo "Pod ${POD_NAME} already exists with only app port exposed (set RECREATE_POD=1 to force)"
   fi
 else
-  echo "Creating pod ${POD_NAME} exposing app port ${APP_PORT}"
+  echo "Creating pod ${POD_NAME} exposing only app port ${APP_PORT}"
   podman pod create --name "${POD_NAME}" -p "${APP_PORT}:8080"
 fi
 
 # Create volumes directories (host paths) if not present
 HOST_BASE="${REPO_DIR}/pod_data"
-mkdir -p "${HOST_BASE}/postgres" "${HOST_BASE}/minio" "${HOST_BASE}/nginx/cache"
+mkdir -p "${HOST_BASE}/pgvector" "${HOST_BASE}/minio" "${HOST_BASE}/nginx/cache"
 
 # Launch Postgres (restart if existing but stopped)
-if [ "$(podman container exists postgres && podman inspect -f '{{.State.Running}}' postgres 2>/dev/null || echo false)" != "true" ]; then
-  echo "(Re)starting postgres container"
-  if podman container exists postgres; then
-    podman rm -f postgres >/dev/null 2>&1 || true
+if [ "$(podman container exists pgvector && podman inspect -f '{{.State.Running}}' pgvector 2>/dev/null || echo false)" != "true" ]; then
+  echo "(Re)starting pgvector container"
+  if podman container exists pgvector; then
+    podman rm -f pgvector >/dev/null 2>&1 || true
   fi
   podman run -d --restart=always --pod "${POD_NAME}" \
-    --name postgres \
+    --name pgvector \
     --env-file "${POSTGRES_ENV_FILE}" \
-    -v "${HOST_BASE}/postgres:/var/lib/postgresql" \
+    -v "${HOST_BASE}/pgvector:/var/lib/postgresql/data" \
     "${POSTGRES_IMAGE}"
 else
-  echo "postgres container already running"
+  echo "pgvector container already running"
 fi
 
 # Launch MinIO (restart if existing but stopped)
@@ -124,10 +145,10 @@ http {
   server {
     listen 8081;
     # Adjust upstream origin below to the real job fetcher endpoint if not local
-    set $jobfetcher_origin https://remote-jobfetcher.example.com;
+    set $jobfetcher_origin https://api.apify.com/v2/acts/curious_coder~linkedin-jobs-scraper/run-sync-get-dataset-items;
     location / {
       proxy_pass $jobfetcher_origin;
-      proxy_set_header Host remote-jobfetcher.example.com;
+      proxy_set_header Host api.apify.com;
       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
       proxy_cache jobfetcher_cache;
       proxy_cache_valid 200 10m;
@@ -181,6 +202,3 @@ fi
 
 echo "Pod setup complete. Containers status (shared pod ports appear on each row):" 
 podman ps --filter "pod=${POD_NAME}" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-echo "\nExternal ports exposed:"
-podman port "${POD_NAME}" || true
-echo "\nNote: The host mapping 0.0.0.0:${APP_PORT}->8080/tcp belongs to the pod and is shown for every container. Other service ports (5432,9000,8081) are internal only (no host binding)."

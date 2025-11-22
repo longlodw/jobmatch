@@ -123,7 +123,8 @@ func main() {
 	clientSecret := getEnv("GOOGLE_CLIENT_SECRET")
 	webLoginRedirectURL := getEnv("WEB_LOGIN_REDIRECT_URL")
 	apiLoginRedirectURL := getEnv("API_LOGIN_REDIRECT_URL")
-	driveRedirectURL := getEnv("DRIVE_REDIRECT_URL")
+	apiDriveRedirectURL := getEnv("API_DRIVE_REDIRECT_URL")
+	webDriveRedirectURL := getEnv("WEB_DRIVE_REDIRECT_URL")
 	pgConnStr := getEnv("PG_CONN_STR")
 	pgSecret := getEnv("PG_SECRET")
 	minioEndpoint := getEnv("MINIO_ENDPOINT")
@@ -143,6 +144,7 @@ func main() {
 		serverAddr = ":8080"
 	}
 
+	secureCookies = os.Getenv("COOKIE_SECURE") == "1"
 	ctx := context.Background()
 
 	webLoginOAuth, err := NewGoogleOAuth(ctx, clientID, clientSecret, webLoginRedirectURL)
@@ -153,7 +155,14 @@ func main() {
 	if err != nil {
 		logger.Fatal("failed to init google oauth (api)", zap.Error(err))
 	}
-	driveOAuth, err := NewGoogleOAuth(ctx, clientID, clientSecret, driveRedirectURL)
+	driveOAuth, err := NewGoogleOAuth(ctx, clientID, clientSecret, apiDriveRedirectURL)
+	if err != nil {
+		logger.Fatal("failed to init google oauth (drive api)", zap.Error(err))
+	}
+	driveWebOAuth, err := NewGoogleOAuth(ctx, clientID, clientSecret, webDriveRedirectURL)
+	if err != nil {
+		logger.Fatal("failed to init google oauth (drive web)", zap.Error(err))
+	}
 
 	storage, err := NewStorage(ctx, pgConnStr, pgSecret, minioEndpoint, minioAccessKey, minioSecretKey, minioBucket, false)
 	if err != nil {
@@ -164,7 +173,7 @@ func main() {
 	jobFetcher := NewJobFetcher(jobFetcherURL, jobFetcherToken)
 	embedder := NewEmbeder(embedBaseURL, embedAPIKey)
 
-	webService := NewService(webLoginOAuth, driveOAuth, storage, jobFetcher, embedder, rootFolderName, logger)
+	webService := NewService(webLoginOAuth, driveWebOAuth, storage, jobFetcher, embedder, rootFolderName, logger)
 	apiService := NewService(apiLoginOAuth, driveOAuth, storage, jobFetcher, embedder, rootFolderName, logger)
 
 	// parse templates (include all fragments)
@@ -197,10 +206,15 @@ func main() {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// attempt to get user via idToken cookie (optional for home)
 		uid, _, _ := getIDTokenSubject(r, webLoginOAuth, logger)
-		// create CSRF token for UI (not for API)
-		csrfToken, err := generateCSRFToken()
-		if err == nil {
-			setCSRFCookie(w, csrfToken)
+		// create or reuse CSRF token (prevent rotation desync across tabs)
+		var csrfToken string
+		if existing, _ := r.Cookie("csrf"); existing != nil && existing.Value != "" {
+			csrfToken = existing.Value
+		} else {
+			if tok, err := generateCSRFToken(); err == nil {
+				csrfToken = tok
+				setCSRFCookie(w, csrfToken)
+			}
 		}
 		data := struct {
 			Authenticated bool
@@ -232,7 +246,8 @@ func main() {
 			http.Error(w, err.Error(), st)
 			return
 		}
-		http.SetCookie(w, &http.Cookie{Name: "idToken", Value: idToken, Path: "/", HttpOnly: true, Secure: false, SameSite: http.SameSiteLaxMode})
+		secure := os.Getenv("COOKIE_SECURE") == "1"
+		http.SetCookie(w, &http.Cookie{Name: "idToken", Value: idToken, Path: "/", HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode})
 		http.Redirect(w, r, "/", http.StatusFound)
 	})
 
@@ -341,6 +356,7 @@ func main() {
 			fragmentError(w, tmpl, http.StatusForbidden, "bad csrf")
 			return
 		}
+		refreshCSRFCookie(w, r)
 		if err := r.ParseForm(); err != nil {
 			fragmentError(w, tmpl, http.StatusBadRequest, "bad form")
 			return
@@ -376,6 +392,7 @@ func main() {
 			fragmentError(w, tmpl, http.StatusForbidden, "bad csrf")
 			return
 		}
+		refreshCSRFCookie(w, r)
 		if err := r.ParseForm(); err != nil {
 			fragmentError(w, tmpl, http.StatusBadRequest, "bad form")
 			return
@@ -434,6 +451,7 @@ func main() {
 			fragmentError(w, tmpl, http.StatusForbidden, "bad csrf")
 			return
 		}
+		refreshCSRFCookie(w, r)
 		if err := r.ParseForm(); err != nil {
 			fragmentError(w, tmpl, http.StatusBadRequest, "bad form")
 			return
@@ -460,6 +478,7 @@ func main() {
 			fragmentError(w, tmpl, http.StatusForbidden, "bad csrf")
 			return
 		}
+		refreshCSRFCookie(w, r)
 		uid, _, _ := getIDTokenSubject(r, webLoginOAuth, logger) // optional
 		var searchURL string
 		if uid != "" {
@@ -468,10 +487,18 @@ func main() {
 				searchURL = url
 			}
 		}
+		var driveEnabled bool
+		if uid != "" {
+			enabled, _, err := webService.HasDriveEnabled(r.Context(), uid)
+			if err == nil {
+				driveEnabled = enabled
+			}
+		}
 		data := struct {
 			Authenticated bool
 			SearchURL     string
-		}{Authenticated: uid != "", SearchURL: searchURL}
+			DriveEnabled  bool
+		}{Authenticated: uid != "", SearchURL: searchURL, DriveEnabled: driveEnabled}
 		if err := tmpl.ExecuteTemplate(w, "settings", data); err != nil {
 			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
 		}
@@ -487,6 +514,7 @@ func main() {
 			fragmentError(w, tmpl, http.StatusForbidden, "bad csrf")
 			return
 		}
+		refreshCSRFCookie(w, r)
 		if err := r.ParseForm(); err != nil {
 			fragmentError(w, tmpl, http.StatusBadRequest, "bad form")
 			return
@@ -513,6 +541,23 @@ func main() {
 			fragmentError(w, tmpl, http.StatusForbidden, "bad csrf")
 			return
 		}
+		refreshCSRFCookie(w, r)
+		enabled, st2, err := webService.HasDriveEnabled(r.Context(), uid)
+		if err != nil {
+			fragmentError(w, tmpl, st2, err.Error())
+			return
+		}
+		if enabled {
+			if err := tmpl.ExecuteTemplate(w, "success_fragment", struct{ Message string }{Message: "Drive already enabled."}); err != nil {
+				fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
+			}
+			return
+		}
+		if !validateCSRF(r) {
+			fragmentError(w, tmpl, http.StatusForbidden, "bad csrf")
+			return
+		}
+		refreshCSRFCookie(w, r)
 		authURL, st2, err := webService.EnableDrive(r.Context(), uid)
 		if err != nil {
 			logger.Error("enable drive failed", zap.Error(err), zap.String("uid", uid))
@@ -526,7 +571,22 @@ func main() {
 		}
 	}))
 
-	// JSON API endpoints
+	// drive enable callback (web flow) sets up tokens then redirects to settings
+	mux.HandleFunc("/drive/enable/callback", func(w http.ResponseWriter, r *http.Request) {
+		uid, st, err := getIDTokenSubject(r, webLoginOAuth, logger)
+		if err != nil {
+			http.Error(w, err.Error(), st)
+			return
+		}
+		state := r.URL.Query().Get("state")
+		code := r.URL.Query().Get("code")
+		st2, err := webService.EnableDriveCallback(r.Context(), uid, state, code)
+		if err != nil {
+			http.Error(w, err.Error(), st2)
+			return
+		}
+		http.Redirect(w, r, "/", http.StatusFound)
+	})
 	mux.HandleFunc("/api/login", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)

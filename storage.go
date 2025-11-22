@@ -30,6 +30,7 @@ type IStorage interface {
 	UpdateUserLastSearched(ctx context.Context, id string) error
 	SelectUserToken(ctx context.Context, id string) (refreshToken string, err error)
 	SelectUserDriveTokens(ctx context.Context, id string) (driveAccessToken, driveRefreshToken string, tokenExpiry sql.NullTime, err error)
+	HasDriveEnabled(ctx context.Context, id string) (bool, error)
 	SelectUserSearchURL(ctx context.Context, id string) (searchURL string, err error)
 	SelectUserLastSearched(ctx context.Context, id string) (lastSearched sql.NullTime, err error)
 
@@ -70,12 +71,9 @@ type IStorage interface {
 	}, err error)
 
 	GetJobContent(ctx context.Context, id string) (jobContent string, err error)
-	StoreCode(ctx context.Context, codeVerifier, codeChallenge string) error
-	GetCode(ctx context.Context, codeChallenge string) (codeVerifier string, err error)
-	DeleteCode(ctx context.Context, codeChallenge string) error
-	StoreState(ctx context.Context, state string) error
-	GetState(ctx context.Context, state string) (isValid bool, err error)
-	DeleteState(ctx context.Context, state string) error
+	StoreCode(ctx context.Context, state, codeVerifier string) error
+	GetCode(ctx context.Context, state string) (codeVerifier string, isValid bool, err error)
+	DeleteCode(ctx context.Context, state string) error
 
 	Close() error
 }
@@ -222,7 +220,9 @@ func (s *Storage) SelectUserToken(ctx context.Context, id string) (refreshToken 
 
 func (s *Storage) SelectUserDriveTokens(ctx context.Context, id string) (driveAccessToken, driveRefreshToken string, tokenExpiry sql.NullTime, err error) {
 	err = s.db.QueryRowContext(ctx, `
-		SELECT pgp_sym_decrypt(drive_access_token, $2), pgp_sym_decrypt(drive_refresh_token, $2), drive_token_expiry
+		SELECT CASE WHEN drive_access_token IS NULL THEN NULL ELSE  pgp_sym_decrypt(drive_access_token, $2) END,
+		       CASE WHEN drive_refresh_token IS NULL THEN NULL ELSE pgp_sym_decrypt(drive_refresh_token, $2) END,
+		       drive_token_expiry
 		FROM users
 		WHERE id = $1;
 	`, id, s.pgSecret).Scan(&driveAccessToken, &driveRefreshToken, &tokenExpiry)
@@ -500,57 +500,48 @@ func (s *Storage) GetJobContent(ctx context.Context, id string) (jobContent stri
 	return string(result), nil
 }
 
-func (s *Storage) StoreCode(ctx context.Context, codeVerifier, codeChallenge string) error {
-	_, err := s.minioClient.PutObject(ctx, s.bucketName, "codes/"+codeChallenge+".txt",
+func (s *Storage) StoreCode(ctx context.Context, state, codeVerifier string) error {
+	_, err := s.minioClient.PutObject(ctx, s.bucketName, "codes/"+state+".txt",
 		strings.NewReader(codeVerifier), int64(len(codeVerifier)), minio.PutObjectOptions{ContentType: "text/plain", UserMetadata: map[string]string{
 			"created_at": time.Now().Format(time.RFC3339),
 		}})
 	return err
 }
 
-func (s *Storage) GetCode(ctx context.Context, codeChallenge string) (codeVerifier string, err error) {
-	obj, err := s.minioClient.GetObject(ctx, s.bucketName, "codes/"+codeChallenge+".txt", minio.GetObjectOptions{})
+func (s *Storage) GetCode(ctx context.Context, state string) (codeVerifier string, isValid bool, err error) {
+	info, err := s.minioClient.StatObject(ctx, s.bucketName, "codes/"+state+".txt", minio.StatObjectOptions{})
 	if err != nil {
-		return "", err
+		return "", false, err
+	}
+	lastModified := info.LastModified
+	if time.Since(lastModified) > 10*time.Minute {
+		return "", false, nil
+	}
+	obj, err := s.minioClient.GetObject(ctx, s.bucketName, "codes/"+state+".txt", minio.GetObjectOptions{})
+	if err != nil {
+		return "", false, err
 	}
 	defer obj.Close()
 	result, err := io.ReadAll(obj)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	return string(result), nil
+	return string(result), true, nil
 }
 
-func (s *Storage) DeleteCode(ctx context.Context, codeChallenge string) error {
-	return s.minioClient.RemoveObject(ctx, s.bucketName, "codes/"+codeChallenge+".txt", minio.RemoveObjectOptions{})
+func (s *Storage) DeleteCode(ctx context.Context, state string) error {
+	return s.minioClient.RemoveObject(ctx, s.bucketName, "codes/"+state+".txt", minio.RemoveObjectOptions{})
 }
 
-func (s *Storage) StoreState(ctx context.Context, state string) error {
-	expiration := time.Now().Add(1 * time.Minute).Format(time.RFC3339)
-	_, err := s.minioClient.PutObject(ctx, s.bucketName, "states/"+state+".txt",
-		strings.NewReader(expiration), int64(len(expiration)), minio.PutObjectOptions{ContentType: "text/plain"})
-	return err
-}
-
-func (s *Storage) GetState(ctx context.Context, state string) (isValid bool, err error) {
-	obj, err := s.minioClient.GetObject(ctx, s.bucketName, "states/"+state+".txt", minio.GetObjectOptions{})
+func (s *Storage) HasDriveEnabled(ctx context.Context, id string) (bool, error) {
+	var accessToken sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+		SELECT drive_access_token FROM users WHERE id = $1;
+	`, id).Scan(&accessToken)
 	if err != nil {
 		return false, err
 	}
-	defer obj.Close()
-	result, err := io.ReadAll(obj)
-	if err != nil {
-		return false, err
-	}
-	expiration, err := time.Parse(time.RFC3339, string(result))
-	if err != nil {
-		return false, err
-	}
-	return time.Now().Before(expiration), nil
-}
-
-func (s *Storage) DeleteState(ctx context.Context, state string) error {
-	return s.minioClient.RemoveObject(ctx, s.bucketName, "states/"+state+".txt", minio.RemoveObjectOptions{})
+	return accessToken.Valid, nil
 }
 
 func (s *Storage) Close() error { return s.db.Close() }

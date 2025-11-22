@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/base64"
 	"errors"
 	"io"
 	"strings"
@@ -19,7 +17,7 @@ import (
 )
 
 type IOAuth interface {
-	Initiate(scopes []string) (authUrl, state, codeVerifier, codeChallenge string, err error)
+	Initiate(scopes []string) (authUrl, state, codeVerifier string, err error)
 	Exchange(ctx context.Context, code, codeVerifier string) (*oauth2.Token, error)
 	VerifyIDToken(ctx context.Context, idToken string) (*oidc.IDToken, error)
 	Refresh(ctx context.Context, refreshToken string) (*oauth2.Token, error)
@@ -52,7 +50,7 @@ func NewGoogleOAuth(ctx context.Context, clientID, clientSecret, redirectURL str
 	}, nil
 }
 
-func (g *GoogleOAuth) Initiate(scopes []string) (authUrl, state, codeVerifier, codeChallenge string, err error) {
+func (g *GoogleOAuth) Initiate(scopes []string) (authUrl, state, codeVerifier string, err error) {
 	config := &oauth2.Config{
 		ClientID:     g.clientID,
 		ClientSecret: g.clientSecret,
@@ -60,7 +58,7 @@ func (g *GoogleOAuth) Initiate(scopes []string) (authUrl, state, codeVerifier, c
 		Scopes:       scopes,
 		Endpoint:     google.Endpoint,
 	}
-	codeVerifier, codeChallenge, err = generateCodePair()
+	codeVerifier, codeChallenge, err := generateCodePair()
 	if err != nil {
 		return
 	}
@@ -197,7 +195,6 @@ func generateCodePair() (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
-	hashedBuffer := sha256.Sum256([]byte(codeVerifier))
-	codeChallenge := base64.RawURLEncoding.EncodeToString(hashedBuffer[:])
+	codeChallenge := pkce.CodeChallengeS256(codeVerifier)
 	return codeVerifier, codeChallenge, nil
 }
