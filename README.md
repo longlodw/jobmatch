@@ -6,18 +6,18 @@ This repository contains an MVP implementation of a job application assistant. I
 
 - Google Sign-In (OIDC) login and logout flow
 - HTMX fragment endpoints for:
-  - Job listing with status filtering
+  - Pending job swipe deck (single-card Tinder-style)
   - Job detail panel (raw content preview)
   - Inline job note edit/save/cancel
-  - Job status update (dropdown)
+  - Job status update (Interested / Not Interested actions)
   - Resume list + upload (link a Google Doc file ID)
-  - Settings panel (search URL + Drive enable)
-- Google Drive enable flow (returns authorization URL)
+  - Settings panel (search URL only)
+- (Removed) Status filtering UI and standalone Google Drive enable flow
 - Persistent storage integration (Postgres + MinIO via `Storage` abstraction)
 - Daily/remote job ingester integration via `JobFetcher` (external service URL + token)
 - Embedding service integration (OpenAI‑compatible base URL + API key)
 - Unified error fragment (`error_fragment`) for all HTMX endpoints
-- CSRF protection for all state‑changing POST requests and selected GET fragments (`/settings`, `/settings/drive`)
+- CSRF protection for all state‑changing POST requests and selected GET fragments (`/settings`)
 - Consistent HTTP status codes (`http.Status*`)
 
 ## Repository Layout
@@ -52,8 +52,8 @@ The server fails fast if any required configuration is missing. Provide these be
 |----------|---------|
 | `GOOGLE_CLIENT_ID` | Google OAuth client ID |
 | `GOOGLE_CLIENT_SECRET` | Google OAuth client secret |
-| `WEB_LOGIN_REDIRECT_URL` | OAuth redirect URI for browser login flow |
-| `API_LOGIN_REDIRECT_URL` | OAuth redirect URI for API/client login flow |
+| `WEB_REDIRECT_URL` | OAuth redirect URI for browser login flow |
+| `API_REDIRECT_URL` | OAuth redirect URI for API/client login flow |
 | `DRIVE_REDIRECT_URL` | OAuth redirect URI for Drive enable callback |
 | `PG_CONN_STR` | Postgres connection string |
 | `PG_SECRET` | Encryption / key material for sensitive data |
@@ -69,7 +69,6 @@ The server fails fast if any required configuration is missing. Provide these be
 Optional variables with defaults:
 - `ROOT_FOLDER_NAME` (default: `JobMatch Applications`)
 - `SERVER_ADDR` (default: `:8080`)
-- `FRONTEND_ORIGIN` (default: `http://localhost:5173` for CORS dev)
 
 ## Quick Start
 
