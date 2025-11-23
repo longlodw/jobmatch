@@ -16,59 +16,44 @@ const (
 	JobStatusPending       = "PENDING"
 	JobStatusInterested    = "INTERESTED"
 	JobStatusNotInterested = "NOT_INTERESTED"
-	JobStatusApplied       = "APPLIED"
-	JobStatusInterviewing  = "INTERVIEWING"
-	JobStatusOffered       = "OFFERED"
-	JobStatusRejected      = "REJECTED"
 )
 
+type JobMetadata struct {
+	ID         string
+	UserID     string
+	ResumeID   string
+	Status     string
+	LastUpdate time.Time
+}
+
+type ResumeMetadata struct {
+	ID          string
+	LastUpdated time.Time
+}
+
+type EmbeddingScore struct {
+	ID         string
+	Similarity float32
+}
+
 type IStorage interface {
-	InsertUser(ctx context.Context, id, refreshToken string) error
-	UpdateUserToken(ctx context.Context, id, refreshToken string) error
-	UpdateUserDriveTokens(ctx context.Context, id string, accessToken, refreshToken sql.NullString, tokenExpiry sql.NullTime) error
+	InsertUser(ctx context.Context, id, refreshToken, accessToken string, tokenExpiry time.Time) error
 	UpdateUserSearchURL(ctx context.Context, id string, searchURL sql.NullString) error
 	UpdateUserLastSearched(ctx context.Context, id string) error
-	SelectUserToken(ctx context.Context, id string) (refreshToken string, err error)
-	SelectUserDriveTokens(ctx context.Context, id string) (driveAccessToken, driveRefreshToken sql.NullString, tokenExpiry sql.NullTime, err error)
-	HasDriveEnabled(ctx context.Context, id string) (bool, error)
+	SelectUserTokens(ctx context.Context, id string) (refreshToken, accessToken string, tokenExpiry time.Time, err error)
 	SelectUserSearchURL(ctx context.Context, id string) (searchURL sql.NullString, err error)
 	SelectUserLastSearched(ctx context.Context, id string) (lastSearched sql.NullTime, err error)
 
 	InsertResume(ctx context.Context, id, userID string) error
 	UpdateResumeTimestamp(ctx context.Context, id, userID string) error
-	SelectResumesByUser(ctx context.Context, userID string, offset int) (resumes []struct {
-		id          string
-		lastUpdated sql.NullTime
-	}, err error)
-	SelectResumesByEmbedding(ctx context.Context, userID string, embedding []float32, topK int) (resumes []struct {
-		id         string
-		similarity float32
-	}, err error)
+	SelectResumesByUser(ctx context.Context, userID string, offset int) (resumes []ResumeMetadata, err error)
+	SelectResumesByEmbedding(ctx context.Context, userID string, embedding []float32, topK int) (resumes []EmbeddingScore, err error)
 	InsertResumeEmbedding(ctx context.Context, resumeID string, embedding []float32) error
 	DeleteResumeEmbedding(ctx context.Context, resumeID string) error
 
 	InsertJob(ctx context.Context, id, userID, resumeID, jobContent string) error
 	UpdateJobStatus(ctx context.Context, id, userID, status string) error
-	UpdateJobNote(ctx context.Context, id, userID string, note sql.NullString) error
-	UpdateJobGoogleDriveID(ctx context.Context, id, userID string, driveID sql.NullString) error
-	SelectJobsByUser(ctx context.Context, userID string, offset int) (jobs []struct {
-		id          string
-		status      string
-		note        sql.NullString
-		lastUpdated sql.NullTime
-	}, err error)
-	SelectJobByStatus(ctx context.Context, userID, status string, offset int) (jobs []struct {
-		id          string
-		status      string
-		note        sql.NullString
-		lastUpdated sql.NullTime
-	}, err error)
-	SelectJob(ctx context.Context, userID, jobID string) (job struct {
-		id          string
-		status      string
-		note        sql.NullString
-		lastUpdated sql.NullTime
-	}, err error)
+	SelectJobByStatus(ctx context.Context, userID, status string) (jobs []JobMetadata, err error)
 
 	GetJobContent(ctx context.Context, id string) (jobContent string, err error)
 	StoreCode(ctx context.Context, state, codeVerifier string) error
@@ -116,38 +101,32 @@ func NewStorage(ctx context.Context, dbConnStr, pgSecret, minioEndpoint, minioAc
 		CREATE TABLE IF NOT EXISTS users (
 			id TEXT PRIMARY KEY,
 			refresh_token BYTEA NOT NULL,
-			drive_access_token BYTEA DEFAULT NULL,
-			drive_refresh_token BYTEA DEFAULT NULL,
-			drive_token_expiry TIMESTAMPTZ DEFAULT NULL,
+			access_token BYTEA NOT NULL,
+			token_expiry TIMESTAMPTZ NOT NULL,
 			search_url TEXT DEFAULT NULL,
 			last_searched TIMESTAMPTZ DEFAULT NULL
 		);
 		CREATE TABLE IF NOT EXISTS resumes (
-			id TEXT,
-			user_id TEXT,
-			last_updated TIMESTAMPTZ DEFAULT NOW(),
+			id TEXT NOT NULL,
+			user_id TEXT NOT NULL FOREIGN KEY REFERENCES users(id) ON DELETE CASCADE,
+			last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			PRIMARY KEY (id, user_id)
 		);
-		CREATE INDEX IF NOT EXISTS id_to_resumes ON resumes (id);
 		CREATE INDEX IF NOT EXISTS user_id_to_resumes ON resumes (user_id);
 		CREATE TABLE IF NOT EXISTS jobs (
-			id TEXT,
-			user_id TEXT,
-			resume_id TEXT,
-			status TEXT,
-			note TEXT DEFAULT NULL,
-			application_drive_id TEXT DEFAULT NULL,
+			id TEXT NOT NULL,
+			user_id TEXT NOT NULL FOREIGN KEY REFERENCES users(id) ON DELETE CASCADE,
+			resume_id TEXT NOT NULL FOREIGN KEY REFERENCES resumes(id) ON DELETE CASCADE,
+			status TEXT NOT NULL,
 			last_updated TIMESTAMPTZ DEFAULT NOW(),
 			PRIMARY KEY (id, user_id)
 		);
-		CREATE INDEX IF NOT EXISTS id_to_jobs ON jobs (id);
-		CREATE INDEX IF NOT EXISTS user_id_to_jobs ON jobs (user_id);
-		CREATE INDEX IF NOT EXISTS status_to_jobs ON jobs (status);
+		CREATE INDEX IF NOT EXISTS user_id_status_to_jobs ON jobs (user_id, status);
 		CREATE EXTENSION IF NOT EXISTS pgcrypto;
 		CREATE EXTENSION IF NOT EXISTS vector;
 		CREATE TABLE IF NOT EXISTS resume_embeddings (
-			resume_id TEXT,
-			embedding VECTOR(3072)
+			resume_id TEXT FOREIGN KEY REFERENCES resumes(id) ON DELETE CASCADE,
+			embedding VECTOR(3072) NOT NULL
 		);
 		CREATE INDEX IF NOT EXISTS resume_id_to_embeddings ON resume_embeddings (resume_id);
 	`)
@@ -163,43 +142,15 @@ func NewStorage(ctx context.Context, dbConnStr, pgSecret, minioEndpoint, minioAc
 	}, nil
 }
 
-func (s *Storage) InsertUser(ctx context.Context, id, refreshToken string) error {
+func (s *Storage) InsertUser(ctx context.Context, id, refreshToken, accessToken string, tokenExpiry time.Time) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO users (id, refresh_token) VALUES ($1, pgp_sym_encrypt($2, $3))
-		ON CONFLICT (id) DO UPDATE SET refresh_token = pgp_sym_encrypt($2, $3);
-	`, id, refreshToken, s.pgSecret)
-	return err
-}
-
-func (s *Storage) UpdateUserToken(ctx context.Context, id, refreshToken string) error {
-	_, err := s.db.ExecContext(ctx, `
-		UPDATE users
-		SET refresh_token = pgp_sym_encrypt($2, $3)
-		WHERE id = $1;
-	`, id, refreshToken, s.pgSecret)
-	return err
-}
-
-func (s *Storage) UpdateUserDriveTokens(ctx context.Context, id string, accessToken, refreshToken sql.NullString, tokenExpiry sql.NullTime) error {
-	var accessVal any
-	if accessToken.Valid {
-		accessVal = accessToken.String
-	} else {
-		accessVal = nil
-	}
-	var refreshVal any
-	if refreshToken.Valid {
-		refreshVal = refreshToken.String
-	} else {
-		refreshVal = nil
-	}
-	_, err := s.db.ExecContext(ctx, `
-		UPDATE users
-		SET drive_access_token = CASE WHEN $2 IS NULL THEN NULL ELSE pgp_sym_encrypt($2, $5) END,
-			drive_refresh_token = CASE WHEN $3 IS NULL THEN NULL ELSE pgp_sym_encrypt($3, $5) END,
-			drive_token_expiry = $4
-		WHERE id = $1;
-	`, id, accessVal, refreshVal, tokenExpiry, s.pgSecret)
+		INSERT INTO users (id, refresh_token, access_token, token_expiry)
+		VALUES ($1, pgp_sym_encrypt($2, $4), pgp_sym_encrypt($3, $4), $5)
+		ON CONFLICT (id) DO UPDATE SET
+			refresh_token = EXCLUDED.refresh_token,
+			access_token = EXCLUDED.access_token,
+			token_expiry = EXCLUDED.token_expiry;
+	`, id, refreshToken, accessToken, s.pgSecret, tokenExpiry)
 	return err
 }
 
@@ -227,24 +178,15 @@ func (s *Storage) UpdateUserLastSearched(ctx context.Context, id string) error {
 	return err
 }
 
-func (s *Storage) SelectUserToken(ctx context.Context, id string) (refreshToken string, err error) {
-	err = s.db.QueryRowContext(ctx, `
-		SELECT pgp_sym_decrypt(refresh_token, $2)
-		FROM users
-		WHERE id = $1;
-	`, id, s.pgSecret).Scan(&refreshToken)
-	return
-}
-
-func (s *Storage) SelectUserDriveTokens(ctx context.Context, id string) (driveAccessToken, driveRefreshToken sql.NullString, tokenExpiry sql.NullTime, err error) {
+func (s *Storage) SelectUserTokens(ctx context.Context, id string) (refreshToken, accessToken string, tokenExpiry time.Time, err error) {
 	err = s.db.QueryRowContext(ctx, `
 		SELECT
-			CASE WHEN drive_access_token IS NULL THEN NULL ELSE pgp_sym_decrypt(drive_access_token, $2) END,
-			CASE WHEN drive_refresh_token IS NULL THEN NULL ELSE pgp_sym_decrypt(drive_refresh_token, $2) END,
-			drive_token_expiry
+			pgp_sym_decrypt(refresh_token, $2),
+			pgp_sym_decrypt(access_token, $2),
+			token_expiry
 		FROM users
 		WHERE id = $1;
-	`, id, s.pgSecret).Scan(&driveAccessToken, &driveRefreshToken, &tokenExpiry)
+	`, id, s.pgSecret).Scan(&refreshToken, &accessToken, &tokenExpiry)
 	return
 }
 
@@ -284,10 +226,7 @@ func (s *Storage) UpdateResumeTimestamp(ctx context.Context, id, userID string) 
 	return err
 }
 
-func (s *Storage) SelectResumesByUser(ctx context.Context, userID string, offset int) (resumes []struct {
-	id          string
-	lastUpdated sql.NullTime
-}, err error) {
+func (s *Storage) SelectResumesByUser(ctx context.Context, userID string, offset int) (resumes []ResumeMetadata, err error) {
 	var rows *sql.Rows
 	if offset < 0 {
 		rows, err = s.db.QueryContext(ctx, `
@@ -309,25 +248,19 @@ func (s *Storage) SelectResumesByUser(ctx context.Context, userID string, offset
 	defer rows.Close()
 	for rows.Next() {
 		var id string
-		var lastUpdated sql.NullTime
+		var lastUpdated time.Time
 		if err := rows.Scan(&id, &lastUpdated); err != nil {
 			return nil, err
 		}
-		resumes = append(resumes, struct {
-			id          string
-			lastUpdated sql.NullTime
-		}{
-			id:          id,
-			lastUpdated: lastUpdated,
+		resumes = append(resumes, ResumeMetadata{
+			ID:          id,
+			LastUpdated: lastUpdated,
 		})
 	}
 	return resumes, rows.Err()
 }
 
-func (s *Storage) SelectResumesByEmbedding(ctx context.Context, userID string, embedding []float32, topK int) (resumes []struct {
-	id         string
-	similarity float32
-}, err error) {
+func (s *Storage) SelectResumesByEmbedding(ctx context.Context, userID string, embedding []float32, topK int) (resumes []EmbeddingScore, err error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT r.id AS id, avg(1 - (re.embedding <=> $2)) AS similarity
 		FROM resumes r
@@ -347,12 +280,9 @@ func (s *Storage) SelectResumesByEmbedding(ctx context.Context, userID string, e
 		if err := rows.Scan(&id, &similarity); err != nil {
 			return nil, err
 		}
-		resumes = append(resumes, struct {
-			id         string
-			similarity float32
-		}{
-			id:         id,
-			similarity: similarity,
+		resumes = append(resumes, EmbeddingScore{
+			ID:         id,
+			Similarity: similarity,
 		})
 	}
 	return resumes, rows.Err()
@@ -398,124 +328,31 @@ func (s *Storage) UpdateJobStatus(ctx context.Context, id, userID, status string
 	return err
 }
 
-func (s *Storage) UpdateJobNote(ctx context.Context, id, userID string, note sql.NullString) error {
-	var noteVal any
-	if note.Valid {
-		noteVal = note.String
-	} else {
-		noteVal = nil
-	}
-	_, err := s.db.ExecContext(ctx, `
-		UPDATE jobs
-		SET note = $3, last_updated = NOW()
-		WHERE id = $1 AND user_id = $2;
-	`, id, userID, noteVal)
-	return err
-}
-
-func (s *Storage) UpdateJobGoogleDriveID(ctx context.Context, id, userID string, driveID sql.NullString) error {
-	var driveVal any
-	if driveID.Valid {
-		driveVal = driveID.String
-	} else {
-		driveVal = nil
-	}
-	_, err := s.db.ExecContext(ctx, `
-		UPDATE jobs
-		SET application_drive_id = $3, last_updated = NOW()
-		WHERE id = $1 AND user_id = $2;
-	`, id, userID, driveVal)
-	return err
-}
-
-func (s *Storage) SelectJobsByUser(ctx context.Context, userID string, offset int) (jobs []struct {
-	id          string
-	status      string
-	note        sql.NullString
-	lastUpdated sql.NullTime
-}, err error) {
+func (s *Storage) SelectJobByStatus(ctx context.Context, userID, status string) (jobs []JobMetadata, err error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, status, note, last_updated
-		FROM jobs
-		WHERE user_id = $1
-		LIMIT 20 OFFSET $2;
-	`, userID, offset)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id, status string
-		var note sql.NullString
-		var lastUpdated sql.NullTime
-		if err := rows.Scan(&id, &status, &note, &lastUpdated); err != nil {
-			return nil, err
-		}
-		jobs = append(jobs, struct {
-			id          string
-			status      string
-			note        sql.NullString
-			lastUpdated sql.NullTime
-		}{
-			id:          id,
-			status:      status,
-			note:        note,
-			lastUpdated: lastUpdated,
-		})
-	}
-	return jobs, rows.Err()
-}
-
-func (s *Storage) SelectJobByStatus(ctx context.Context, userID, status string, offset int) (jobs []struct {
-	id          string
-	status      string
-	note        sql.NullString
-	lastUpdated sql.NullTime
-}, err error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, status, note, last_updated
+		SELECT id, status, last_updated
 		FROM jobs
 		WHERE user_id = $1 AND status = $2
-		LIMIT 20 OFFSET $3;
-	`, userID, status, offset)
+		LIMIT 20;
+	`, userID, status)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var id, st string
-		var note sql.NullString
-		var lastUpdated sql.NullTime
-		if err := rows.Scan(&id, &st, &note, &lastUpdated); err != nil {
+		var lastUpdated time.Time
+		if err := rows.Scan(&id, &st, &lastUpdated); err != nil {
 			return nil, err
 		}
-		jobs = append(jobs, struct {
-			id          string
-			status      string
-			note        sql.NullString
-			lastUpdated sql.NullTime
-		}{
-			id:          id,
-			status:      st,
-			note:        note,
-			lastUpdated: lastUpdated,
+		jobs = append(jobs, JobMetadata{
+			ID:         id,
+			UserID:     userID,
+			Status:     st,
+			LastUpdate: lastUpdated,
 		})
 	}
 	return jobs, rows.Err()
-}
-
-func (s *Storage) SelectJob(ctx context.Context, userID, jobID string) (job struct {
-	id          string
-	status      string
-	note        sql.NullString
-	lastUpdated sql.NullTime
-}, err error) {
-	err = s.db.QueryRowContext(ctx, `
-		SELECT id, status, note, last_updated
-		FROM jobs
-		WHERE user_id = $1 AND id = $2;
-	`, userID, jobID).Scan(&job.id, &job.status, &job.note, &job.lastUpdated)
-	return
 }
 
 func (s *Storage) GetJobContent(ctx context.Context, id string) (jobContent string, err error) {
@@ -562,20 +399,6 @@ func (s *Storage) GetCode(ctx context.Context, state string) (codeVerifier strin
 
 func (s *Storage) DeleteCode(ctx context.Context, state string) error {
 	return s.minioClient.RemoveObject(ctx, s.bucketName, "codes/"+state+".txt", minio.RemoveObjectOptions{})
-}
-
-func (s *Storage) HasDriveEnabled(ctx context.Context, id string) (bool, error) {
-	var accessToken sql.NullString
-	var refreshToken sql.NullString
-	err := s.db.QueryRowContext(ctx, `
-		SELECT CASE WHEN drive_access_token IS NULL THEN NULL ELSE pgp_sym_decrypt(drive_access_token, $2) END,
-		       CASE WHEN drive_refresh_token IS NULL THEN NULL ELSE pgp_sym_decrypt(drive_refresh_token, $2) END
-		FROM users WHERE id = $1;
-	`, id, s.pgSecret).Scan(&accessToken, &refreshToken)
-	if err != nil {
-		return false, err
-	}
-	return accessToken.Valid && refreshToken.Valid, nil
 }
 
 func (s *Storage) Close() error { return s.db.Close() }

@@ -14,6 +14,7 @@ import (
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/option"
+	"google.golang.org/api/sheets/v4"
 )
 
 type IOAuth interface {
@@ -28,6 +29,9 @@ type IDrive interface {
 	CopyFile(ctx context.Context, fileId, parentFolderId string) (string, error)
 	ExportDocsAsText(ctx context.Context, fileId string) (string, error)
 	LastModifiedTime(ctx context.Context, fileId string) (time.Time, error)
+	CreateSheetIfNotExists(ctx context.Context, sheetName string, parentFolderID string) (string, error)
+	InsertRows(ctx context.Context, sheetId string, values [][]any) error
+	GetFileLink(fileId string) string
 }
 
 type GoogleOAuth struct {
@@ -114,16 +118,24 @@ func ExtractIDToken(token *oauth2.Token) (string, error) {
 }
 
 type GoogleDrive struct {
-	driveService *drive.Service
+	driveService  *drive.Service
+	sheetsService *sheets.Service
 }
 
 func NewGoogleDrive(ctx context.Context, oauthToken *oauth2.Token) (*GoogleDrive, error) {
 	ts := oauth2.StaticTokenSource(oauthToken)
-	srv, err := drive.NewService(ctx, option.WithTokenSource(ts))
+	driveSrv, err := drive.NewService(ctx, option.WithTokenSource(ts))
 	if err != nil {
 		return nil, err
 	}
-	return &GoogleDrive{driveService: srv}, nil
+	sheetsSrv, err := sheets.NewService(ctx, option.WithTokenSource(ts))
+	if err != nil {
+		return nil, err
+	}
+	return &GoogleDrive{
+		driveService:  driveSrv,
+		sheetsService: sheetsSrv,
+	}, nil
 }
 
 func (g *GoogleDrive) CreateFolderIfNotExists(ctx context.Context, folderName string, parentFolderID string) (string, error) {
@@ -188,6 +200,48 @@ func (g *GoogleDrive) LastModifiedTime(ctx context.Context, fileId string) (time
 		return time.Time{}, err
 	}
 	return modifiedTime, nil
+}
+
+func (g *GoogleDrive) CreateSheetIfNotExists(ctx context.Context, sheetName string, parentFolderID string) (string, error) {
+	query := "mimeType='application/vnd.google-apps.spreadsheet' and name='" + sheetName + "' and trashed=false"
+	if parentFolderID != "" {
+		query += " and '" + parentFolderID + "' in parents"
+	}
+	r, err := g.driveService.Files.List().Q(query).Fields("files(id, name)").Do()
+	if err != nil {
+		return "", err
+	}
+	if len(r.Files) > 0 {
+		return r.Files[0].Id, nil
+	}
+	sheet := &drive.File{
+		Name:     sheetName,
+		MimeType: "application/vnd.google-apps.spreadsheet",
+	}
+	if parentFolderID != "" {
+		sheet.Parents = []string{parentFolderID}
+	}
+	createdSheet, err := g.driveService.Files.Create(sheet).Fields("id").Do()
+	if err != nil {
+		return "", err
+	}
+	return createdSheet.Id, nil
+}
+
+func (g *GoogleDrive) InsertRows(ctx context.Context, sheetId string, values [][]any) error {
+	srv := g.sheetsService
+	valueRange := &sheets.ValueRange{
+		Values: values,
+	}
+	_, err := srv.Spreadsheets.Values.Append(sheetId, "Sheet1", valueRange).ValueInputOption("RAW").InsertDataOption("INSERT_ROWS").Do()
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (g *GoogleDrive) GetFileLink(fileId string) string {
+	return "https://drive.google.com/file/d/" + fileId + "/view"
 }
 
 func generateCodePair() (string, string, error) {

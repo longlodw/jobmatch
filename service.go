@@ -15,8 +15,17 @@ import (
 	"golang.org/x/oauth2"
 )
 
+type JobData struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	CompanyName string `json:"companyName"`
+	Description string `json:"description"`
+	Link        string `json:"link"`
+	PostedAt    string `json:"postedAt"`
+}
+
 type Service struct {
-	loginOAuth     IOAuth
+	oAuth          IOAuth
 	driveOAuth     IOAuth
 	storage        IStorage
 	jobFetcher     IJobFetcher
@@ -25,10 +34,9 @@ type Service struct {
 	logger         *zap.Logger
 }
 
-func NewService(loginOAuth, driveOAuth IOAuth, storage IStorage, jobFetcher IJobFetcher, embedder IEmbedder, rootFolderName string, logger *zap.Logger) *Service {
+func NewService(oAuth IOAuth, storage IStorage, jobFetcher IJobFetcher, embedder IEmbedder, rootFolderName string, logger *zap.Logger) *Service {
 	return &Service{
-		loginOAuth:     loginOAuth,
-		driveOAuth:     driveOAuth,
+		oAuth:          oAuth,
 		storage:        storage,
 		jobFetcher:     jobFetcher,
 		embedder:       embedder,
@@ -39,8 +47,9 @@ func NewService(loginOAuth, driveOAuth IOAuth, storage IStorage, jobFetcher IJob
 
 func (s *Service) Login(ctx context.Context) (authUrl string, httpStatus int, err error) {
 	s.logger.Info("initiating login")
-	scopes := []string{"openid"}
-	authUrl, state, codeVerifier, err := s.loginOAuth.Initiate(scopes)
+	// scopes with openid and google drive read any file and edit files
+	scopes := []string{"openid", "https://www.googleapis.com/auth/drive.readonly", "https://www.googleapis.com/auth/drive.file"}
+	authUrl, state, codeVerifier, err := s.oAuth.Initiate(scopes)
 	if err != nil {
 		s.logger.Error("failed to initiate login", zap.Error(err))
 		return "", http.StatusInternalServerError, err
@@ -65,7 +74,7 @@ func (s *Service) LoginCallback(ctx context.Context, state, code string) (idToke
 		s.logger.Error("invalid state parameter")
 		return "", http.StatusBadRequest, errors.New("invalid state parameter")
 	}
-	token, err := s.loginOAuth.Exchange(ctx, code, codeVerifier)
+	token, err := s.oAuth.Exchange(ctx, code, codeVerifier)
 	if err != nil {
 		s.logger.Error("failed to exchange code for token", zap.Error(err))
 		return "", http.StatusBadRequest, err
@@ -75,13 +84,15 @@ func (s *Service) LoginCallback(ctx context.Context, state, code string) (idToke
 		s.logger.Error("failed to extract ID token", zap.Error(err))
 		return "", http.StatusBadRequest, err
 	}
-	verifiedIDToken, err := s.loginOAuth.VerifyIDToken(ctx, idToken)
+	verifiedIDToken, err := s.oAuth.VerifyIDToken(ctx, idToken)
 	if err != nil {
 		s.logger.Error("failed to verify ID token", zap.Error(err))
 		return "", http.StatusBadRequest, err
 	}
 	refreshToken := token.RefreshToken
-	err = s.storage.InsertUser(ctx, verifiedIDToken.Subject, refreshToken)
+	accessToken := token.AccessToken
+	expiry := token.Expiry
+	err = s.storage.InsertUser(ctx, verifiedIDToken.Subject, refreshToken, accessToken, expiry)
 	if err != nil {
 		s.logger.Error("failed to insert user", zap.Error(err))
 		return "", http.StatusInternalServerError, err
@@ -90,87 +101,33 @@ func (s *Service) LoginCallback(ctx context.Context, state, code string) (idToke
 	return idToken, http.StatusOK, nil
 }
 
-func (s *Service) RefreshToken(ctx context.Context, userID string) (newIDToken string, httpStatus int, err error) {
+func (s *Service) RefreshToken(ctx context.Context, userID string) (idToken, refreshToken, accessToken string, httpStatus int, err error) {
 	s.logger.Info("refreshing token", zap.String("userID", userID))
-	refreshToken, err := s.storage.SelectUserToken(ctx, userID)
+	refreshToken, _, _, err = s.storage.SelectUserTokens(ctx, userID)
 	if err != nil {
 		s.logger.Error("failed to get refresh token", zap.Error(err))
-		return "", http.StatusInternalServerError, err
+		return "", "", "", http.StatusInternalServerError, err
 	}
-	newToken, err := s.loginOAuth.Refresh(ctx, refreshToken)
+	newToken, err := s.oAuth.Refresh(ctx, refreshToken)
 	if err != nil {
 		s.logger.Error("failed to refresh token", zap.Error(err))
-		return "", http.StatusInternalServerError, err
+		return "", "", "", http.StatusInternalServerError, err
 	}
-	newIDToken = newToken.Extra("id_token").(string)
+	idToken = newToken.Extra("id_token").(string)
+	accessToken = newToken.AccessToken
+	refreshToken = newToken.RefreshToken
+	err = s.storage.InsertUser(ctx, userID, refreshToken, accessToken, newToken.Expiry)
+	if err != nil {
+		s.logger.Error("failed to update user tokens", zap.Error(err))
+		return "", "", "", http.StatusInternalServerError, err
+	}
+	newIDToken, err := ExtractIDToken(newToken)
+	if err != nil {
+		s.logger.Error("failed to extract new ID token", zap.Error(err))
+		return "", "", "", http.StatusInternalServerError, err
+	}
 	s.logger.Info("token refreshed successfully", zap.String("userID", userID))
-	return newIDToken, http.StatusOK, nil
-}
-
-func (s *Service) HasDriveEnabled(ctx context.Context, userID string) (enabled bool, httpStatus int, err error) {
-	s.logger.Info("checking if Google Drive is enabled", zap.String("userID", userID))
-	accessToken, refreshToken, _, err := s.storage.SelectUserDriveTokens(ctx, userID)
-	if err != nil {
-		s.logger.Error("failed to get user drive tokens", zap.Error(err))
-		return false, http.StatusInternalServerError, err
-	}
-	enabled = accessToken.Valid && refreshToken.Valid
-	s.logger.Info("Google Drive enabled status retrieved", zap.String("userID", userID), zap.Bool("enabled", enabled))
-	return enabled, http.StatusOK, nil
-}
-
-func (s *Service) EnableDrive(ctx context.Context, userID string) (authUrl string, httpStatus int, err error) {
-	s.logger.Info("initiating Google Drive enable", zap.String("userID", userID))
-	// Prevent re-enabling if already enabled
-	enabled, st, herr := s.HasDriveEnabled(ctx, userID)
-	if herr != nil {
-		return "", st, herr
-	}
-	if enabled {
-		return "", http.StatusBadRequest, errors.New("drive already enabled")
-	}
-	scopes := []string{"https://www.googleapis.com/auth/drive.file", "https://www.googleapis.com/auth/drive.readonly"}
-	authUrl, state, codeVerifier, err := s.driveOAuth.Initiate(scopes)
-	if err != nil {
-		s.logger.Error("failed to initiate Google Drive enable", zap.Error(err))
-		return "", http.StatusInternalServerError, err
-	}
-	err = s.storage.StoreCode(ctx, state, codeVerifier)
-	if err != nil {
-		s.logger.Error("failed to store code", zap.Error(err))
-		return "", http.StatusInternalServerError, err
-	}
-	s.logger.Info("Google Drive enable initiated", zap.String("authUrl", authUrl))
-	return authUrl, http.StatusOK, nil
-}
-
-func (s *Service) EnableDriveCallback(ctx context.Context, userID, state, code string) (int, error) {
-	s.logger.Info("handling Google Drive enable callback", zap.String("userID", userID), zap.String("state", state), zap.String("code", code))
-	codeVerifier, isValid, err := s.storage.GetCode(ctx, state)
-	if err != nil {
-		s.logger.Error("failed to get code verifier", zap.Error(err))
-		return http.StatusBadRequest, err
-	}
-	if !isValid {
-		s.logger.Error("invalid state parameter")
-		return http.StatusBadRequest, errors.New("invalid state parameter")
-	}
-	token, err := s.driveOAuth.Exchange(ctx, code, codeVerifier)
-	if err != nil {
-		s.logger.Error("failed to exchange code for token", zap.Error(err))
-		return http.StatusBadRequest, err
-	}
-	accessToken := sql.NullString{String: token.AccessToken, Valid: token.AccessToken != ""}
-	refreshToken := sql.NullString{String: token.RefreshToken, Valid: token.RefreshToken != ""}
-	accessTokenExpiry := token.Expiry
-	sqlNullAccessTokenExpiry := sql.NullTime{Time: accessTokenExpiry, Valid: true}
-	err = s.storage.UpdateUserDriveTokens(ctx, userID, accessToken, refreshToken, sqlNullAccessTokenExpiry)
-	if err != nil {
-		s.logger.Error("failed to update user drive tokens", zap.Error(err))
-		return http.StatusInternalServerError, err
-	}
-	s.logger.Info("Google Drive enabled successfully", zap.String("userID", userID))
-	return http.StatusOK, nil
+	return newIDToken, refreshToken, accessToken, http.StatusOK, nil
 }
 
 func (s *Service) SetSearchURL(ctx context.Context, userID, searchURL string) (int, error) {
@@ -196,10 +153,7 @@ func (s *Service) GetSearchURL(ctx context.Context, userID string) (string, int,
 	return searchUrl.String, http.StatusOK, nil
 }
 
-func (s *Service) GetResumes(ctx context.Context, userID string, offset int) ([]struct {
-	id          string
-	lastUpdated sql.NullTime
-}, int, error) {
+func (s *Service) GetResumes(ctx context.Context, userID string, offset int) ([]ResumeMetadata, int, error) {
 	s.logger.Info("getting resumes", zap.String("userID", userID))
 	resume, err := s.storage.SelectResumesByUser(ctx, userID, offset)
 	if err != nil {
@@ -256,12 +210,7 @@ func (s *Service) UploadResume(ctx context.Context, userID, fileID string) (int,
 	return http.StatusOK, nil
 }
 
-func (s *Service) GetJobs(ctx context.Context, userID string, offset int, status string) ([]struct {
-	id          string
-	status      string
-	note        sql.NullString
-	lastUpdated sql.NullTime
-}, int, error) {
+func (s *Service) GetJobs(ctx context.Context, userID string, offset int, status string) ([]JobMetadata, int, error) {
 	s.logger.Info("getting jobs", zap.String("userID", userID), zap.Int("offset", offset), zap.String("status", status))
 	drive, httpStatus, err := s.driveForUser(ctx, userID)
 	if err != nil {
@@ -272,34 +221,13 @@ func (s *Service) GetJobs(ctx context.Context, userID string, offset int, status
 		s.logger.Error("failed to fetch jobs", zap.Error(err))
 		return nil, st, err
 	}
-	if status == "" {
-		s.logger.Info("retrieving all jobs", zap.String("userID", userID), zap.Int("offset", offset))
-		jobs, err := s.storage.SelectJobsByUser(ctx, userID, offset)
-		if err != nil {
-			s.logger.Error("failed to get jobs", zap.Error(err))
-			return nil, http.StatusInternalServerError, err
-		}
-		s.logger.Info("jobs retrieved successfully", zap.String("userID", userID), zap.Int("count", len(jobs)))
-		return jobs, http.StatusOK, nil
-	}
-	jobs, err := s.storage.SelectJobByStatus(ctx, userID, status, offset)
+	jobs, err := s.storage.SelectJobByStatus(ctx, userID, status)
 	if err != nil {
 		s.logger.Error("failed to get jobs by status", zap.Error(err))
 		return nil, http.StatusInternalServerError, err
 	}
 	s.logger.Info("jobs by status retrieved successfully", zap.String("userID", userID), zap.String("status", status), zap.Int("count", len(jobs)))
 	return jobs, http.StatusOK, nil
-}
-
-func (s *Service) UpdateJobNote(ctx context.Context, userID, jobID, note string) (int, error) {
-	s.logger.Info("updating job note", zap.String("userID", userID), zap.String("jobID", jobID))
-	nullNote := sql.NullString{String: note, Valid: note != ""}
-	if err := s.storage.UpdateJobNote(ctx, userID, jobID, nullNote); err != nil {
-		s.logger.Error("failed to update job note", zap.Error(err))
-		return http.StatusInternalServerError, err
-	}
-	s.logger.Info("job note updated successfully", zap.String("userID", userID), zap.String("jobID", jobID))
-	return http.StatusOK, nil
 }
 
 func (s *Service) UpdateJobStatus(ctx context.Context, userID, jobID, status string) (int, error) {
@@ -326,9 +254,25 @@ func (s *Service) UpdateJobStatus(ctx context.Context, userID, jobID, status str
 			s.logger.Error("failed to copy job file to job folder", zap.Error(err))
 			return http.StatusInternalServerError, err
 		}
-		nullDriveID := sql.NullString{String: jobFolderID, Valid: jobFolderID != ""}
-		if err := s.storage.UpdateJobGoogleDriveID(ctx, userID, jobID, nullDriveID); err != nil {
-			s.logger.Error("failed to update job Google Drive ID", zap.Error(err))
+		sheetId, err := drive.CreateSheetIfNotExists(ctx, "Job Details", rootFolderID)
+		if err != nil {
+			s.logger.Error("failed to create or get job details sheet", zap.Error(err))
+			return http.StatusInternalServerError, err
+		}
+		jobContent, err := s.storage.GetJobContent(ctx, jobID)
+		if err != nil {
+			s.logger.Error("failed to get job content", zap.Error(err))
+			return http.StatusInternalServerError, err
+		}
+		jobFolderLink := drive.GetFileLink(jobFolderID)
+		var jobContentObj JobData
+		if err := json.Unmarshal([]byte(jobContent), &jobContentObj); err != nil {
+			s.logger.Error("failed to unmarshal job content", zap.Error(err))
+			return http.StatusInternalServerError, err
+		}
+		rowToInsert := [][]any{{jobContentObj.Title, jobContentObj.CompanyName, jobContentObj.Description, jobContentObj.Link, jobContentObj.PostedAt, jobFolderLink}}
+		if err := drive.InsertRows(ctx, sheetId, rowToInsert); err != nil {
+			s.logger.Error("failed to insert job details into sheet", zap.Error(err))
 			return http.StatusInternalServerError, err
 		}
 		if err := s.storage.UpdateJobStatus(ctx, userID, jobID, JobStatusInterested); err != nil {
@@ -337,7 +281,7 @@ func (s *Service) UpdateJobStatus(ctx context.Context, userID, jobID, status str
 		}
 		s.logger.Info("job status updated to interested successfully", zap.String("userID", userID), zap.String("jobID", jobID))
 		return http.StatusOK, nil
-	case JobStatusPending, JobStatusNotInterested, JobStatusApplied, JobStatusInterviewing, JobStatusOffered, JobStatusRejected:
+	case JobStatusNotInterested:
 		if err := s.storage.UpdateJobStatus(ctx, userID, jobID, status); err != nil {
 			s.logger.Error("failed to update job status", zap.Error(err))
 			return http.StatusInternalServerError, err
@@ -359,26 +303,6 @@ func (s *Service) GetJobDetails(ctx context.Context, userID, jobID string) (stri
 	}
 	s.logger.Info("job details retrieved successfully", zap.String("userID", userID), zap.String("jobID", jobID))
 	return jobContent, http.StatusOK, nil
-}
-
-func (s *Service) GetJob(ctx context.Context, userID, jobID string) (struct {
-	id          string
-	status      string
-	note        sql.NullString
-	lastUpdated sql.NullTime
-}, int, error) {
-	s.logger.Info("getting single job", zap.String("userID", userID), zap.String("jobID", jobID))
-	job, err := s.storage.SelectJob(ctx, userID, jobID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			s.logger.Error("job not found", zap.Error(err))
-			return job, http.StatusNotFound, err
-		}
-		s.logger.Error("failed to get job", zap.Error(err))
-		return job, http.StatusInternalServerError, err
-	}
-	s.logger.Info("job retrieved successfully", zap.String("userID", userID), zap.String("jobID", jobID))
-	return job, http.StatusOK, nil
 }
 
 func (s *Service) fetchJobsIfNeeded(ctx context.Context, drive IDrive, userID string) (int, error) {
@@ -416,23 +340,20 @@ func (s *Service) fetchJobsIfNeeded(ctx context.Context, drive IDrive, userID st
 	arrErr := make([]error, len(resumes))
 	for k, resume := range resumes {
 		wg.Add(1)
-		go func(i int, resume struct {
-			id          string
-			lastUpdated sql.NullTime
-		}) {
+		go func(i int, resume ResumeMetadata) {
 			defer wg.Done()
-			lastModified, err := drive.LastModifiedTime(ctx, resume.id)
+			lastModified, err := drive.LastModifiedTime(ctx, resume.ID)
 			if err != nil {
 				arrErr[i] = err
 				return
 			}
-			if !resume.lastUpdated.Valid || lastModified.After(resume.lastUpdated.Time) {
-				if _, err := s.UploadResume(ctx, userID, resume.id); err != nil {
+			if lastModified.After(resume.LastUpdated) {
+				if _, err := s.UploadResume(ctx, userID, resume.ID); err != nil {
 					arrErr[i] = err
 					return
 				}
 				// update timestamp after successful re-upload
-				_ = s.storage.UpdateResumeTimestamp(ctx, resume.id, userID)
+				_ = s.storage.UpdateResumeTimestamp(ctx, resume.ID, userID)
 			}
 		}(k, resume)
 	}
@@ -464,8 +385,8 @@ func (s *Service) fetchJobsIfNeeded(ctx context.Context, drive IDrive, userID st
 					// A similar job already exists, skip inserting
 					continue
 				}
-				resumeId := resumes[0].id
-				idCounts[resumeId] += resumes[0].similarity
+				resumeId := resumes[0].ID
+				idCounts[resumeId] += resumes[0].Similarity
 			}
 			mostCommonId := lazyiterate.Reduce2(maps.All(idCounts), func(a, k string, v float32) string {
 				if a == "" || v > idCounts[a] {
@@ -497,25 +418,21 @@ func (s *Service) fetchJobsIfNeeded(ctx context.Context, drive IDrive, userID st
 	return http.StatusOK, nil
 }
 
-func sqlNullTime(t time.Time) sql.NullTime { return sql.NullTime{Time: t, Valid: true} }
-
 func (s *Service) driveForUser(ctx context.Context, userID string) (IDrive, int, error) {
-	access, refresh, expiry, err := s.storage.SelectUserDriveTokens(ctx, userID)
+	access, refresh, expiry, err := s.storage.SelectUserTokens(ctx, userID)
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
 	// if expiry invalid or expired and we have refresh token, refresh
-	if (expiry.Valid && time.Now().After(expiry.Time)) && refresh.Valid {
-		newTok, err := s.loginOAuth.Refresh(ctx, refresh.String)
+	if time.Now().After(expiry) {
+		var httpStatus int
+		_, refresh, access, httpStatus, err = s.RefreshToken(ctx, userID)
 		if err != nil {
-			return nil, http.StatusInternalServerError, err
+			return nil, httpStatus, err
 		}
-		access = sql.NullString{String: newTok.AccessToken, Valid: newTok.AccessToken != ""}
-		// update storage with new access token & expiry
-		_ = s.storage.UpdateUserDriveTokens(ctx, userID, access, refresh, sqlNullTime(newTok.Expiry))
 	}
 	// Build oauth2.Token for drive client
-	oauthTok := &oauth2.Token{AccessToken: access.String, RefreshToken: refresh.String, Expiry: expiry.Time}
+	oauthTok := &oauth2.Token{AccessToken: access, RefreshToken: refresh, Expiry: expiry}
 	drive, err := NewGoogleDrive(ctx, oauthTok)
 	if err != nil {
 		return nil, http.StatusInternalServerError, err

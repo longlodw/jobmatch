@@ -121,10 +121,8 @@ func main() {
 
 	clientID := getEnv("GOOGLE_CLIENT_ID")
 	clientSecret := getEnv("GOOGLE_CLIENT_SECRET")
-	webLoginRedirectURL := getEnv("WEB_LOGIN_REDIRECT_URL")
-	apiLoginRedirectURL := getEnv("API_LOGIN_REDIRECT_URL")
-	apiDriveRedirectURL := getEnv("API_DRIVE_REDIRECT_URL")
-	webDriveRedirectURL := getEnv("WEB_DRIVE_REDIRECT_URL")
+	webRedirectURL := getEnv("WEB_REDIRECT_URL")
+	apiRedirectURL := getEnv("API_REDIRECT_URL")
 	pgConnStr := getEnv("PG_CONN_STR")
 	pgSecret := getEnv("PG_SECRET")
 	minioEndpoint := getEnv("MINIO_ENDPOINT")
@@ -147,21 +145,13 @@ func main() {
 	secureCookies = os.Getenv("COOKIE_SECURE") == "1"
 	ctx := context.Background()
 
-	webLoginOAuth, err := NewGoogleOAuth(ctx, clientID, clientSecret, webLoginRedirectURL)
+	webOAuth, err := NewGoogleOAuth(ctx, clientID, clientSecret, webRedirectURL)
 	if err != nil {
 		logger.Fatal("failed to init google oauth (web)", zap.Error(err))
 	}
-	apiLoginOAuth, err := NewGoogleOAuth(ctx, clientID, clientSecret, apiLoginRedirectURL)
+	apiOAuth, err := NewGoogleOAuth(ctx, clientID, clientSecret, apiRedirectURL)
 	if err != nil {
 		logger.Fatal("failed to init google oauth (api)", zap.Error(err))
-	}
-	driveOAuth, err := NewGoogleOAuth(ctx, clientID, clientSecret, apiDriveRedirectURL)
-	if err != nil {
-		logger.Fatal("failed to init google oauth (drive api)", zap.Error(err))
-	}
-	driveWebOAuth, err := NewGoogleOAuth(ctx, clientID, clientSecret, webDriveRedirectURL)
-	if err != nil {
-		logger.Fatal("failed to init google oauth (drive web)", zap.Error(err))
 	}
 
 	storage, err := NewStorage(ctx, pgConnStr, pgSecret, minioEndpoint, minioAccessKey, minioSecretKey, minioBucket, false)
@@ -173,8 +163,8 @@ func main() {
 	jobFetcher := NewJobFetcher(jobFetcherURL, jobFetcherToken)
 	embedder := NewEmbeder(embedBaseURL, embedAPIKey)
 
-	webService := NewService(webLoginOAuth, driveWebOAuth, storage, jobFetcher, embedder, rootFolderName, logger)
-	apiService := NewService(apiLoginOAuth, driveOAuth, storage, jobFetcher, embedder, rootFolderName, logger)
+	webService := NewService(webOAuth, storage, jobFetcher, embedder, rootFolderName, logger)
+	apiService := NewService(apiOAuth, storage, jobFetcher, embedder, rootFolderName, logger)
 
 	// parse templates (include all fragments)
 	tmpl, err := template.ParseFiles(
@@ -184,7 +174,6 @@ func main() {
 		filepath.Join("templates", "job_details.html"),
 		filepath.Join("templates", "note_edit.html"),
 		filepath.Join("templates", "note_fragment.html"),
-		filepath.Join("templates", "drive_authorize.html"),
 		filepath.Join("templates", "resumes.html"),
 		filepath.Join("templates", "settings.html"),
 		filepath.Join("templates", "partials_error.html"),
@@ -205,7 +194,7 @@ func main() {
 	// home page
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// attempt to get user via idToken cookie (optional for home)
-		uid, _, _ := getIDTokenSubject(r, webLoginOAuth, logger)
+		uid, _, _ := getIDTokenSubject(r, webOAuth, logger)
 		// create or reuse CSRF token (prevent rotation desync across tabs)
 		var csrfToken string
 		if existing, _ := r.Cookie("csrf"); existing != nil && existing.Value != "" {
@@ -265,22 +254,41 @@ func main() {
 		http.Redirect(w, r, "/", http.StatusFound)
 	})
 
-	// jobs fragment (htmx)
-	mux.HandleFunc("/jobs", requireAuth(logger, webLoginOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
-		status := r.URL.Query().Get("status")
-		jobs, st2, err := webService.GetJobs(r.Context(), uid, 0, status)
+	// jobs fragment (htmx) - always pending, expand to JobData for swipe UI
+	mux.HandleFunc("/jobs", requireAuth(logger, webOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
+		// ignore status filter; always show pending
+		jobsMeta, st2, err := webService.GetJobs(r.Context(), uid, 0, JobStatusPending)
 		if err != nil {
 			fragmentError(w, tmpl, st2, err.Error())
 			return
 		}
-		data := struct{ Jobs any }{Jobs: jobs}
+		// build []JobData from metadata
+		var jobDatas []JobData
+		for _, jm := range jobsMeta {
+			content, st3, err2 := webService.GetJobDetails(r.Context(), uid, jm.ID)
+			if err2 != nil {
+				logger.Warn("job content fetch failed", zap.Error(err2), zap.String("jobID", jm.ID))
+				if st3 >= 500 { // server error: abort
+					fragmentError(w, tmpl, st3, err2.Error())
+					return
+				}
+				continue
+			}
+			var jd JobData
+			if err := json.Unmarshal([]byte(content), &jd); err != nil {
+				logger.Warn("job content unmarshal failed", zap.Error(err), zap.String("jobID", jm.ID))
+				continue
+			}
+			jobDatas = append(jobDatas, jd)
+		}
+		data := struct{ Jobs any }{Jobs: jobDatas}
 		if err := tmpl.ExecuteTemplate(w, "jobs", data); err != nil {
 			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
 		}
 	}))
 
 	// job details fragment
-	mux.HandleFunc("/job/details", requireAuth(logger, webLoginOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
+	mux.HandleFunc("/job/details", requireAuth(logger, webOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
 		jobID := r.URL.Query().Get("id")
 		if jobID == "" {
 			fragmentError(w, tmpl, http.StatusBadRequest, "missing id")
@@ -302,88 +310,8 @@ func main() {
 		// simply remove panel
 		w.WriteHeader(http.StatusOK)
 	})
-
-	// edit note fragment
-	mux.HandleFunc("/job/note/edit", requireAuth(logger, webLoginOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
-		jobID := r.URL.Query().Get("jobID")
-		if jobID == "" {
-			fragmentError(w, tmpl, http.StatusBadRequest, "missing jobID")
-			return
-		}
-		job, st2, err := webService.GetJob(r.Context(), uid, jobID)
-		if err != nil {
-			fragmentError(w, tmpl, st2, err.Error())
-			return
-		}
-		data := struct{ JobID, Current string }{JobID: jobID, Current: ""}
-		if job.note.Valid {
-			data.Current = job.note.String
-		}
-		if err := tmpl.ExecuteTemplate(w, "note_edit", data); err != nil {
-			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
-		}
-	}))
-
-	// cancel note edit
-	mux.HandleFunc("/job/note/cancel", requireAuth(logger, webLoginOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
-		jobID := r.URL.Query().Get("jobID")
-		if jobID == "" {
-			fragmentError(w, tmpl, http.StatusBadRequest, "missing jobID")
-			return
-		}
-		job, st2, err := webService.GetJob(r.Context(), uid, jobID)
-		if err != nil {
-			fragmentError(w, tmpl, st2, err.Error())
-			return
-		}
-		noteText := "No notes yet"
-		if job.note.Valid {
-			noteText = job.note.String
-		}
-		data := struct{ JobID, Note string }{JobID: jobID, Note: noteText}
-		if err := tmpl.ExecuteTemplate(w, "note_fragment", data); err != nil {
-			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
-		}
-	}))
-
-	// save note (htmx)
-	mux.HandleFunc("/job/note/save", requireAuth(logger, webLoginOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
-		if r.Method != http.MethodPost {
-			fragmentError(w, tmpl, http.StatusMethodNotAllowed, "method not allowed")
-			return
-		}
-		if !validateCSRF(r) {
-			fragmentError(w, tmpl, http.StatusForbidden, "bad csrf")
-			return
-		}
-		refreshCSRFCookie(w, r)
-		if err := r.ParseForm(); err != nil {
-			fragmentError(w, tmpl, http.StatusBadRequest, "bad form")
-			return
-		}
-		jobID := r.Form.Get("jobID")
-		note := r.Form.Get("note")
-		if jobID == "" {
-			fragmentError(w, tmpl, http.StatusBadRequest, "missing jobID")
-			return
-		}
-		if st2, err := webService.UpdateJobNote(r.Context(), uid, jobID, note); err != nil {
-			logger.Error("update job note failed", zap.Error(err), zap.String("jobID", jobID), zap.String("uid", uid))
-			fragmentError(w, tmpl, st2, err.Error())
-			return
-		}
-		logger.Info("job note updated", zap.String("jobID", jobID), zap.String("uid", uid))
-		if note == "" {
-			note = "No notes yet"
-		}
-		data := struct{ JobID, Note string }{JobID: jobID, Note: note}
-		if err := tmpl.ExecuteTemplate(w, "note_fragment", data); err != nil {
-			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
-		}
-	}))
-
 	// update job status (htmx)
-	mux.HandleFunc("/job/status", requireAuth(logger, webLoginOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
+	mux.HandleFunc("/job/status", requireAuth(logger, webOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
 		if r.Method != http.MethodPost {
 			fragmentError(w, tmpl, http.StatusMethodNotAllowed, "method not allowed")
 			return
@@ -409,12 +337,8 @@ func main() {
 			return
 		}
 		logger.Info("job status updated", zap.String("jobID", jobID), zap.String("uid", uid), zap.String("status", status))
-		job, st3, err := webService.GetJob(r.Context(), uid, jobID)
-		if err != nil {
-			fragmentError(w, tmpl, st3, err.Error())
-			return
-		}
-		if err := tmpl.ExecuteTemplate(w, "job_card", job); err != nil {
+		// respond with success fragment (client will remove/swipe card)
+		if err := tmpl.ExecuteTemplate(w, "success_fragment", struct{ Message string }{Message: "Status updated."}); err != nil {
 			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -422,7 +346,7 @@ func main() {
 
 	// resumes fragment
 	mux.HandleFunc("/resumes", func(w http.ResponseWriter, r *http.Request) {
-		uid, _, _ := getIDTokenSubject(r, webLoginOAuth, logger) // optional
+		uid, _, _ := getIDTokenSubject(r, webOAuth, logger) // optional
 		var resumes any
 		if uid != "" {
 			res, _, err := webService.GetResumes(r.Context(), uid, 0)
@@ -442,7 +366,7 @@ func main() {
 	})
 
 	// upload resume (htmx target)
-	mux.HandleFunc("/resumes/upload", requireAuth(logger, webLoginOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
+	mux.HandleFunc("/resumes/upload", requireAuth(logger, webOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
 		if r.Method != http.MethodPost {
 			fragmentError(w, tmpl, http.StatusMethodNotAllowed, "method not allowed")
 			return
@@ -479,7 +403,7 @@ func main() {
 			return
 		}
 		refreshCSRFCookie(w, r)
-		uid, _, _ := getIDTokenSubject(r, webLoginOAuth, logger) // optional
+		uid, _, _ := getIDTokenSubject(r, webOAuth, logger) // optional
 		var searchURL string
 		if uid != "" {
 			url, _, err := webService.GetSearchURL(r.Context(), uid)
@@ -487,25 +411,17 @@ func main() {
 				searchURL = url
 			}
 		}
-		var driveEnabled bool
-		if uid != "" {
-			enabled, _, err := webService.HasDriveEnabled(r.Context(), uid)
-			if err == nil {
-				driveEnabled = enabled
-			}
-		}
 		data := struct {
 			Authenticated bool
 			SearchURL     string
-			DriveEnabled  bool
-		}{Authenticated: uid != "", SearchURL: searchURL, DriveEnabled: driveEnabled}
+		}{Authenticated: uid != "", SearchURL: searchURL}
 		if err := tmpl.ExecuteTemplate(w, "settings", data); err != nil {
 			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
 		}
 	})
 
 	// settings save search URL
-	mux.HandleFunc("/settings/search", requireAuth(logger, webLoginOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
+	mux.HandleFunc("/settings/search", requireAuth(logger, webOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
 		if r.Method != http.MethodPost {
 			fragmentError(w, tmpl, http.StatusMethodNotAllowed, "method not allowed")
 			return
@@ -534,58 +450,6 @@ func main() {
 			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
 		}
 	}))
-
-	// settings enable drive (returns authorize link via template, require CSRF)
-	mux.HandleFunc("/settings/drive", requireAuth(logger, webLoginOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
-		if !validateCSRF(r) {
-			fragmentError(w, tmpl, http.StatusForbidden, "bad csrf")
-			return
-		}
-		refreshCSRFCookie(w, r)
-		enabled, st2, err := webService.HasDriveEnabled(r.Context(), uid)
-		if err != nil {
-			fragmentError(w, tmpl, st2, err.Error())
-			return
-		}
-		if enabled {
-			if err := tmpl.ExecuteTemplate(w, "success_fragment", struct{ Message string }{Message: "Drive already enabled."}); err != nil {
-				fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
-			}
-			return
-		}
-		if !validateCSRF(r) {
-			fragmentError(w, tmpl, http.StatusForbidden, "bad csrf")
-			return
-		}
-		refreshCSRFCookie(w, r)
-		authURL, st2, err := webService.EnableDrive(r.Context(), uid)
-		if err != nil {
-			logger.Error("enable drive failed", zap.Error(err), zap.String("uid", uid))
-			fragmentError(w, tmpl, st2, err.Error())
-			return
-		}
-		logger.Info("drive enable initiated", zap.String("uid", uid))
-		// Instead of returning a link that opens a new tab, instruct HTMX to redirect
-		// the current page to the Google OAuth URL (same behavior pattern as /login).
-		w.Header().Set("HX-Redirect", authURL)
-	}))
-
-	// drive enable callback (web flow) sets up tokens then redirects to settings
-	mux.HandleFunc("/drive/enable/callback", func(w http.ResponseWriter, r *http.Request) {
-		uid, st, err := getIDTokenSubject(r, webLoginOAuth, logger)
-		if err != nil {
-			http.Error(w, err.Error(), st)
-			return
-		}
-		state := r.URL.Query().Get("state")
-		code := r.URL.Query().Get("code")
-		st2, err := webService.EnableDriveCallback(r.Context(), uid, state, code)
-		if err != nil {
-			http.Error(w, err.Error(), st2)
-			return
-		}
-		http.Redirect(w, r, "/", http.StatusFound)
-	})
 	mux.HandleFunc("/api/login", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -609,44 +473,16 @@ func main() {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		uid, verr := verifyAndGetUserID(r, apiLoginOAuth)
+		uid, verr := verifyAndGetUserID(r, apiOAuth)
 		if verr != nil {
 			writeJSON(w, http.StatusUnauthorized, nil, verr)
 			return
 		}
-		newToken, st, err := apiService.RefreshToken(r.Context(), uid)
+		newToken, _, _, st, err := apiService.RefreshToken(r.Context(), uid)
 		writeJSON(w, st, map[string]string{"idToken": newToken}, err)
 	})
-	mux.HandleFunc("/api/drive/enable", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		uid, verr := verifyAndGetUserID(r, apiLoginOAuth)
-		if verr != nil {
-			writeJSON(w, http.StatusUnauthorized, nil, verr)
-			return
-		}
-		authURL, st, err := apiService.EnableDrive(r.Context(), uid)
-		writeJSON(w, st, map[string]string{"authUrl": authURL}, err)
-	})
-	mux.HandleFunc("/api/drive/enable/callback", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		uid, verr := verifyAndGetUserID(r, apiLoginOAuth)
-		if verr != nil {
-			writeJSON(w, http.StatusUnauthorized, nil, verr)
-			return
-		}
-		state := r.URL.Query().Get("state")
-		code := r.URL.Query().Get("code")
-		st, err := apiService.EnableDriveCallback(r.Context(), uid, state, code)
-		writeJSON(w, st, map[string]string{"status": "drive_enabled"}, err)
-	})
 	mux.HandleFunc("/api/search-url", func(w http.ResponseWriter, r *http.Request) {
-		uid, verr := verifyAndGetUserID(r, apiLoginOAuth)
+		uid, verr := verifyAndGetUserID(r, apiOAuth)
 		if verr != nil {
 			writeJSON(w, http.StatusUnauthorized, nil, verr)
 			return
@@ -675,7 +511,7 @@ func main() {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		uid, verr := verifyAndGetUserID(r, apiLoginOAuth)
+		uid, verr := verifyAndGetUserID(r, apiOAuth)
 		if verr != nil {
 			writeJSON(w, http.StatusUnauthorized, nil, verr)
 			return
@@ -689,7 +525,7 @@ func main() {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		uid, verr := verifyAndGetUserID(r, apiLoginOAuth)
+		uid, verr := verifyAndGetUserID(r, apiOAuth)
 		if verr != nil {
 			writeJSON(w, http.StatusUnauthorized, nil, verr)
 			return
@@ -710,41 +546,22 @@ func main() {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		uid, verr := verifyAndGetUserID(r, apiLoginOAuth)
+		uid, verr := verifyAndGetUserID(r, apiOAuth)
 		if verr != nil {
 			writeJSON(w, http.StatusUnauthorized, nil, verr)
 			return
 		}
 		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
-		status := r.URL.Query().Get("status")
-		jobs, st, err := apiService.GetJobs(r.Context(), uid, offset, status)
+		// always pending for API
+		jobs, st, err := apiService.GetJobs(r.Context(), uid, offset, JobStatusPending)
 		writeJSON(w, st, map[string]any{"jobs": jobs}, err)
-	})
-	mux.HandleFunc("/api/job/note", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		uid, verr := verifyAndGetUserID(r, apiLoginOAuth)
-		if verr != nil {
-			writeJSON(w, http.StatusUnauthorized, nil, verr)
-			return
-		}
-		var body struct{ JobID, Note string }
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		if body.JobID == "" {
-			writeJSON(w, http.StatusBadRequest, nil, errMissing("jobID"))
-			return
-		}
-		st, err := apiService.UpdateJobNote(r.Context(), uid, body.JobID, body.Note)
-		writeJSON(w, st, map[string]string{"status": "updated"}, err)
 	})
 	mux.HandleFunc("/api/job/status", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		uid, verr := verifyAndGetUserID(r, apiLoginOAuth)
+		uid, verr := verifyAndGetUserID(r, apiOAuth)
 		if verr != nil {
 			writeJSON(w, http.StatusUnauthorized, nil, verr)
 			return
@@ -773,7 +590,7 @@ func main() {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		uid, verr := verifyAndGetUserID(r, apiLoginOAuth)
+		uid, verr := verifyAndGetUserID(r, apiOAuth)
 		if verr != nil {
 			writeJSON(w, http.StatusUnauthorized, nil, verr)
 			return
