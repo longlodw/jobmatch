@@ -25,13 +25,13 @@ const (
 type IStorage interface {
 	InsertUser(ctx context.Context, id, refreshToken string) error
 	UpdateUserToken(ctx context.Context, id, refreshToken string) error
-	UpdateUserDriveTokens(ctx context.Context, id, accessToken, refreshToken string, tokenExpiry sql.NullTime) error
-	UpdateUserSearchURL(ctx context.Context, id, searchURL string) error
+	UpdateUserDriveTokens(ctx context.Context, id string, accessToken, refreshToken sql.NullString, tokenExpiry sql.NullTime) error
+	UpdateUserSearchURL(ctx context.Context, id string, searchURL sql.NullString) error
 	UpdateUserLastSearched(ctx context.Context, id string) error
 	SelectUserToken(ctx context.Context, id string) (refreshToken string, err error)
-	SelectUserDriveTokens(ctx context.Context, id string) (driveAccessToken, driveRefreshToken string, tokenExpiry sql.NullTime, err error)
+	SelectUserDriveTokens(ctx context.Context, id string) (driveAccessToken, driveRefreshToken sql.NullString, tokenExpiry sql.NullTime, err error)
 	HasDriveEnabled(ctx context.Context, id string) (bool, error)
-	SelectUserSearchURL(ctx context.Context, id string) (searchURL string, err error)
+	SelectUserSearchURL(ctx context.Context, id string) (searchURL sql.NullString, err error)
 	SelectUserLastSearched(ctx context.Context, id string) (lastSearched sql.NullTime, err error)
 
 	InsertResume(ctx context.Context, id, userID string) error
@@ -49,8 +49,8 @@ type IStorage interface {
 
 	InsertJob(ctx context.Context, id, userID, resumeID, jobContent string) error
 	UpdateJobStatus(ctx context.Context, id, userID, status string) error
-	UpdateJobNote(ctx context.Context, id, userID, note string) error
-	UpdateJobGoogleDriveID(ctx context.Context, id, userID, driveID string) error
+	UpdateJobNote(ctx context.Context, id, userID string, note sql.NullString) error
+	UpdateJobGoogleDriveID(ctx context.Context, id, userID string, driveID sql.NullString) error
 	SelectJobsByUser(ctx context.Context, userID string, offset int) (jobs []struct {
 		id          string
 		status      string
@@ -180,23 +180,41 @@ func (s *Storage) UpdateUserToken(ctx context.Context, id, refreshToken string) 
 	return err
 }
 
-func (s *Storage) UpdateUserDriveTokens(ctx context.Context, id, accessToken, refreshToken string, tokenExpiry sql.NullTime) error {
+func (s *Storage) UpdateUserDriveTokens(ctx context.Context, id string, accessToken, refreshToken sql.NullString, tokenExpiry sql.NullTime) error {
+	var accessVal any
+	if accessToken.Valid {
+		accessVal = accessToken.String
+	} else {
+		accessVal = nil
+	}
+	var refreshVal any
+	if refreshToken.Valid {
+		refreshVal = refreshToken.String
+	} else {
+		refreshVal = nil
+	}
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE users
-		SET drive_access_token = pgp_sym_encrypt($2, $5),
-			drive_refresh_token = pgp_sym_encrypt($3, $5),
+		SET drive_access_token = CASE WHEN $2 IS NULL THEN NULL ELSE pgp_sym_encrypt($2, $5) END,
+			drive_refresh_token = CASE WHEN $3 IS NULL THEN NULL ELSE pgp_sym_encrypt($3, $5) END,
 			drive_token_expiry = $4
 		WHERE id = $1;
-	`, id, accessToken, refreshToken, tokenExpiry, s.pgSecret)
+	`, id, accessVal, refreshVal, tokenExpiry, s.pgSecret)
 	return err
 }
 
-func (s *Storage) UpdateUserSearchURL(ctx context.Context, id, searchURL string) error {
+func (s *Storage) UpdateUserSearchURL(ctx context.Context, id string, searchURL sql.NullString) error {
+	var searchVal any
+	if searchURL.Valid {
+		searchVal = searchURL.String
+	} else {
+		searchVal = nil
+	}
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE users
 		SET search_url = $2
 		WHERE id = $1;
-	`, id, searchURL)
+	`, id, searchVal)
 	return err
 }
 
@@ -218,18 +236,19 @@ func (s *Storage) SelectUserToken(ctx context.Context, id string) (refreshToken 
 	return
 }
 
-func (s *Storage) SelectUserDriveTokens(ctx context.Context, id string) (driveAccessToken, driveRefreshToken string, tokenExpiry sql.NullTime, err error) {
+func (s *Storage) SelectUserDriveTokens(ctx context.Context, id string) (driveAccessToken, driveRefreshToken sql.NullString, tokenExpiry sql.NullTime, err error) {
 	err = s.db.QueryRowContext(ctx, `
-		SELECT CASE WHEN drive_access_token IS NULL THEN NULL ELSE  pgp_sym_decrypt(drive_access_token, $2) END,
-		       CASE WHEN drive_refresh_token IS NULL THEN NULL ELSE pgp_sym_decrypt(drive_refresh_token, $2) END,
-		       drive_token_expiry
+		SELECT
+			CASE WHEN drive_access_token IS NULL THEN NULL ELSE pgp_sym_decrypt(drive_access_token, $2) END,
+			CASE WHEN drive_refresh_token IS NULL THEN NULL ELSE pgp_sym_decrypt(drive_refresh_token, $2) END,
+			drive_token_expiry
 		FROM users
 		WHERE id = $1;
 	`, id, s.pgSecret).Scan(&driveAccessToken, &driveRefreshToken, &tokenExpiry)
 	return
 }
 
-func (s *Storage) SelectUserSearchURL(ctx context.Context, id string) (searchURL string, err error) {
+func (s *Storage) SelectUserSearchURL(ctx context.Context, id string) (searchURL sql.NullString, err error) {
 	err = s.db.QueryRowContext(ctx, `
 		SELECT search_url
 		FROM users
@@ -379,21 +398,33 @@ func (s *Storage) UpdateJobStatus(ctx context.Context, id, userID, status string
 	return err
 }
 
-func (s *Storage) UpdateJobNote(ctx context.Context, id, userID, note string) error {
+func (s *Storage) UpdateJobNote(ctx context.Context, id, userID string, note sql.NullString) error {
+	var noteVal any
+	if note.Valid {
+		noteVal = note.String
+	} else {
+		noteVal = nil
+	}
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE jobs
 		SET note = $3, last_updated = NOW()
 		WHERE id = $1 AND user_id = $2;
-	`, id, userID, note)
+	`, id, userID, noteVal)
 	return err
 }
 
-func (s *Storage) UpdateJobGoogleDriveID(ctx context.Context, id, userID, driveID string) error {
+func (s *Storage) UpdateJobGoogleDriveID(ctx context.Context, id, userID string, driveID sql.NullString) error {
+	var driveVal any
+	if driveID.Valid {
+		driveVal = driveID.String
+	} else {
+		driveVal = nil
+	}
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE jobs
 		SET application_drive_id = $3, last_updated = NOW()
 		WHERE id = $1 AND user_id = $2;
-	`, id, userID, driveID)
+	`, id, userID, driveVal)
 	return err
 }
 
@@ -535,13 +566,16 @@ func (s *Storage) DeleteCode(ctx context.Context, state string) error {
 
 func (s *Storage) HasDriveEnabled(ctx context.Context, id string) (bool, error) {
 	var accessToken sql.NullString
+	var refreshToken sql.NullString
 	err := s.db.QueryRowContext(ctx, `
-		SELECT drive_access_token FROM users WHERE id = $1;
-	`, id).Scan(&accessToken)
+		SELECT CASE WHEN drive_access_token IS NULL THEN NULL ELSE pgp_sym_decrypt(drive_access_token, $2) END,
+		       CASE WHEN drive_refresh_token IS NULL THEN NULL ELSE pgp_sym_decrypt(drive_refresh_token, $2) END
+		FROM users WHERE id = $1;
+	`, id, s.pgSecret).Scan(&accessToken, &refreshToken)
 	if err != nil {
 		return false, err
 	}
-	return accessToken.Valid, nil
+	return accessToken.Valid && refreshToken.Valid, nil
 }
 
 func (s *Storage) Close() error { return s.db.Close() }

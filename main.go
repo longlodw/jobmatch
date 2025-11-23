@@ -565,10 +565,9 @@ func main() {
 			return
 		}
 		logger.Info("drive enable initiated", zap.String("uid", uid))
-		data := struct{ AuthURL string }{AuthURL: authURL}
-		if err := tmpl.ExecuteTemplate(w, "drive_authorize", data); err != nil {
-			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
-		}
+		// Instead of returning a link that opens a new tab, instruct HTMX to redirect
+		// the current page to the Google OAuth URL (same behavior pattern as /login).
+		w.Header().Set("HX-Redirect", authURL)
 	}))
 
 	// drive enable callback (web flow) sets up tokens then redirects to settings
