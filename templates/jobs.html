@@ -1,31 +1,68 @@
 {{define "jobs"}}
-{{if eq (len .Jobs) 0}}
-<div class="help" style="grid-column:1/-1">No jobs found.</div>
-{{end}}
-{{range .Jobs}}
-{{template "job_card" .}}
-{{end}}
-{{end}}
+<div class="swipe-wrapper">
+  {{if eq (len .Jobs) 0}}
+    <div class="help">No pending jobs found.</div>
+  {{else}}
+    {{range $i, $j := .Jobs}}
+      <div class="swipe-card" data-index="{{$i}}" {{if ne $i 0}}style="display:none"{{end}} id="job-{{$j.ID}}">
+        <div class="swipe-head">
+          <div class="swipe-title">{{$j.Title}}</div>
+          <div class="swipe-meta">{{$j.CompanyName}} • {{$j.PostedAt}}</div>
+        </div>
+        <div class="swipe-body">
+          <div class="swipe-desc">{{$j.Description}}</div>
+          <div class="swipe-link"><a href="{{$j.Link}}" target="_blank" rel="noopener">Job Link</a></div>
+        </div>
+        <div class="swipe-actions">
+          <button class="ghost swipe-no" data-job="{{$j.ID}}" data-status="NOT_INTERESTED">Not Interested</button>
+          <button class="swipe-yes" data-job="{{$j.ID}}" data-status="INTERESTED">Interested</button>
 
-{{define "job_card"}}
-<div class="job-card" id="job-{{.id}}">
-  <div class="job-head">
-    <div class="status {{.status}}">{{.status}}</div>
-    <div class="job-id" title="{{.id}}">{{.id}}</div>
-  </div>
-  <div class="help" id="note-{{.id}}">{{if .note.Valid}}{{.note.String}}{{else}}No notes yet{{end}}</div>
-  <div class="actions">
-    <button class="ghost" hx-get="/job/details?id={{.id}}" hx-target="#details-area" hx-swap="innerHTML">Details</button>
-    <button class="ghost" hx-get="/job/note/edit?jobID={{.id}}" hx-target="#note-{{.id}}" hx-swap="outerHTML">Edit Note</button>
-    <select class="input" hx-post="/job/status" hx-target="#job-{{.id}}" hx-swap="outerHTML" hx-vals='{"jobID":"{{.id}}"}' name="status">
-      <option {{if eq .status "PENDING"}}selected{{end}}>PENDING</option>
-      <option {{if eq .status "INTERESTED"}}selected{{end}}>INTERESTED</option>
-      <option {{if eq .status "NOT_INTERESTED"}}selected{{end}}>NOT_INTERESTED</option>
-      <option {{if eq .status "APPLIED"}}selected{{end}}>APPLIED</option>
-      <option {{if eq .status "INTERVIEWING"}}selected{{end}}>INTERVIEWING</option>
-      <option {{if eq .status "OFFERED"}}selected{{end}}>OFFERED</option>
-      <option {{if eq .status "REJECTED"}}selected{{end}}>REJECTED</option>
-    </select>
-  </div>
+        </div>
+      </div>
+    {{end}}
+    <div id="swipe-status" class="help" style="margin-top:12px"></div>
+  {{end}}
 </div>
+<script>
+(function(){
+  const cards = Array.from(document.querySelectorAll('.swipe-card')); let idx=0;
+  function show(n){cards.forEach((c,i)=>{c.style.display=i===n?'block':'none'});}
+  let refetchAttempts=0; const maxRefetch=3; let lastRefetch=0; const refetchCooldown=5000;
+  function advance(){
+    idx++;
+    if(idx<cards.length){show(idx); return;}
+    const now=Date.now();
+    const statusEl = document.getElementById('swipe-status');
+    if(refetchAttempts>=maxRefetch){statusEl.textContent='No more jobs available.';return;}
+    if(now-lastRefetch<refetchCooldown){statusEl.textContent='Waiting for new jobs...'; setTimeout(()=>advance(), refetchCooldown-(now-lastRefetch)+50); return;}
+    statusEl.textContent='Refreshing jobs...';
+    lastRefetch=now; refetchAttempts++;
+    htmx.ajax('GET','/jobs',{target:'.swipe-wrapper',swap:'innerHTML',handler:function(){
+      const newCards = document.querySelectorAll('.swipe-card');
+      if(!newCards.length){
+        if(refetchAttempts<maxRefetch){statusEl.textContent='No pending jobs. Will retry...'; setTimeout(()=>advance(), refetchCooldown);}
+        else {statusEl.textContent='No pending jobs found.';}
+      } else {
+        // reset state with new deck
+        cards.length=0; Array.prototype.push.apply(cards, Array.from(newCards)); idx=0; show(0);
+        statusEl.textContent='';
+      }
+    }, error:"<div class='alert'>Failed to fetch jobs.</div>"});
+  }
+  function postStatus(jobID,status,btn){
+    if(btn._clicked) return; btn._clicked=true; // guard
+    const parent = btn.closest('.swipe-actions');
+    parent.querySelectorAll('button').forEach(b=>{b.disabled=true; b.style.opacity='.6';});
+    const statusEl = document.getElementById('swipe-status');
+    statusEl.textContent='Updating...';
+    htmx.ajax('POST','/job/status',{target:'#swipe-status',swap:'innerHTML',values:{jobID:jobID,status:status}});
+  }
+  document.body.addEventListener('htmx:afterOnLoad', function(evt){
+    if(evt.detail.target && evt.detail.target.id==='swipe-status'){advance();}
+  });
+  document.querySelectorAll('.swipe-actions button').forEach(btn=>{
+    btn.addEventListener('click',function(){postStatus(this.dataset.job,this.dataset.status,this);});
+  });
+})();
+</script>
 {{end}}

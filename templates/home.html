@@ -1,26 +1,11 @@
 {{define "content"}}
 <div class="panel">
   <div class="panel-header">
-    <div><strong>Jobs</strong><div class="help">Review and update statuses</div></div>
-    {{if .Authenticated}}
-    <div class="row" style="display:flex;gap:8px;align-items:center;">
-      <select class="input" id="statusFilter" hx-get="/jobs" hx-target="#jobs" hx-include="#statusFilter" hx-params="status" name="status">
-        <option value="">ALL</option>
-        <option>PENDING</option>
-        <option>INTERESTED</option>
-        <option>NOT_INTERESTED</option>
-        <option>APPLIED</option>
-        <option>INTERVIEWING</option>
-        <option>OFFERED</option>
-        <option>REJECTED</option>
-      </select>
-      <button class="ghost" hx-get="/jobs" hx-target="#jobs" hx-include="#statusFilter">Refresh</button>
-    </div>
-    {{end}}
+    <div><strong>Jobs</strong><div class="help">Swipe through pending jobs</div></div>
   </div>
   <div class="panel-body">
     {{if .Authenticated}}
-      <div id="jobs" hx-get="/jobs" hx-trigger="load" class="grid-jobs"></div>
+      <div id="jobs" hx-get="/jobs" hx-trigger="load"></div>
     {{else}}
       <div class="help">Please login to view jobs.</div>
     {{end}}

@@ -8,7 +8,7 @@
       <button>Upload</button>
     </form>
     <div id="resumeUploadStatus" class="help"></div>
-    <div class="grid-jobs" style="margin-top:10px; grid-template-columns:repeat(auto-fill,minmax(200px,1fr));">
+    <div class="grid-resumes" style="margin-top:10px; display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:12px;">
       {{if eq (len .Resumes) 0}}<div class="help" style="grid-column:1/-1">No resumes uploaded.</div>{{end}}
       {{range .Resumes}}
         <div class="job-card">

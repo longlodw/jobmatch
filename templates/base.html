@@ -23,11 +23,11 @@ document.addEventListener('htmx:configRequest', function(evt){
     <div class="brand"><div class="brand-badge"></div><span>JobMatch</span></div>
     <div class="spacer"></div>
      {{if .Authenticated}}
-       <nav class="nav" style="display:flex;gap:10px;align-items:center;margin-right:16px">
-         <button class="ghost" hx-get="/jobs" hx-target="#jobs" hx-swap="innerHTML" hx-include="#statusFilter">Jobs</button>
-         <button class="ghost" hx-get="/resumes" hx-target="#details-area" hx-swap="innerHTML">Resumes</button>
-         <button class="ghost" hx-get="/settings" hx-target="#details-area" hx-swap="innerHTML">Settings</button>
-       </nav>
+         <nav class="nav" style="display:flex;gap:10px;align-items:center;margin-right:16px">
+          <button class="ghost" hx-get="/jobs" hx-target="#jobs" hx-swap="innerHTML">Jobs</button>
+          <button class="ghost" hx-get="/resumes" hx-target="#details-area" hx-swap="innerHTML">Resumes</button>
+          <button class="ghost" hx-get="/settings" hx-target="#details-area" hx-swap="innerHTML">Settings</button>
+        </nav>
        <form method="post" action="/logout" style="margin:0"><button class="ghost" hx-post="/logout" hx-target="body" hx-swap="innerHTML">Logout</button></form>
      {{else}}
        <form method="get" action="/login" style="margin:0"><button>Login with Google</button></form>
