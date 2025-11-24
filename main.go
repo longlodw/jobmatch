@@ -172,8 +172,6 @@ func main() {
 		filepath.Join("templates", "home.html"),
 		filepath.Join("templates", "jobs.html"),
 		filepath.Join("templates", "job_details.html"),
-		filepath.Join("templates", "note_edit.html"),
-		filepath.Join("templates", "note_fragment.html"),
 		filepath.Join("templates", "resumes.html"),
 		filepath.Join("templates", "settings.html"),
 		filepath.Join("templates", "partials_error.html"),

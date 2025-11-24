@@ -107,16 +107,15 @@ func NewStorage(ctx context.Context, dbConnStr, pgSecret, minioEndpoint, minioAc
 			last_searched TIMESTAMPTZ DEFAULT NULL
 		);
 		CREATE TABLE IF NOT EXISTS resumes (
-			id TEXT NOT NULL,
-			user_id TEXT NOT NULL FOREIGN KEY REFERENCES users(id) ON DELETE CASCADE,
-			last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			PRIMARY KEY (id, user_id)
+			id TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
 		CREATE INDEX IF NOT EXISTS user_id_to_resumes ON resumes (user_id);
 		CREATE TABLE IF NOT EXISTS jobs (
 			id TEXT NOT NULL,
-			user_id TEXT NOT NULL FOREIGN KEY REFERENCES users(id) ON DELETE CASCADE,
-			resume_id TEXT NOT NULL FOREIGN KEY REFERENCES resumes(id) ON DELETE CASCADE,
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			resume_id TEXT NOT NULL REFERENCES resumes(id) ON DELETE CASCADE,
 			status TEXT NOT NULL,
 			last_updated TIMESTAMPTZ DEFAULT NOW(),
 			PRIMARY KEY (id, user_id)
@@ -125,7 +124,7 @@ func NewStorage(ctx context.Context, dbConnStr, pgSecret, minioEndpoint, minioAc
 		CREATE EXTENSION IF NOT EXISTS pgcrypto;
 		CREATE EXTENSION IF NOT EXISTS vector;
 		CREATE TABLE IF NOT EXISTS resume_embeddings (
-			resume_id TEXT FOREIGN KEY REFERENCES resumes(id) ON DELETE CASCADE,
+			resume_id TEXT REFERENCES resumes(id) ON DELETE CASCADE,
 			embedding VECTOR(3072) NOT NULL
 		);
 		CREATE INDEX IF NOT EXISTS resume_id_to_embeddings ON resume_embeddings (resume_id);
