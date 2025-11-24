@@ -1,6 +1,6 @@
 # JobMatch MVP
 
-This repository contains an MVP implementation of a job application assistant. It focuses on a single Go backend with server‑rendered HTML (HTMX fragments) to help users browse jobs, manage notes and statuses, upload resume document references, and configure basic settings.
+This repository contains an MVP implementation of a job application assistant. It focuses on a single Go backend with server‑rendered HTML (HTMX fragments) to help users browse jobs.
 
 ## Implemented Features
 
@@ -8,7 +8,7 @@ This repository contains an MVP implementation of a job application assistant. I
 - HTMX fragment endpoints for:
   - Pending job swipe deck (single-card Tinder-style)
   - Job detail panel (raw content preview)
-  - Inline job note edit/save/cancel
+
   - Job status update (Interested / Not Interested actions)
   - Resume list + upload (link a Google Doc file ID)
   - Settings panel (search URL only)
@@ -111,6 +111,23 @@ To tear down everything:
 podman pod rm -f jobmatch-pod
 rm -rf /var/lib/podman_volumes/jobmatch
 ```
+
+## Services-Only Pod (Run App Locally)
+
+Use `scripts/create_services_pod.sh` to start only Postgres, MinIO (API + Console), and the Nginx job fetcher cache, exposing their ports to the host while you run the Go app directly.
+
+Usage:
+1. Ensure `.env.postgres`, `.env.minio`, `.env.nginx`, and your `.env.app` exist.
+2. Start services: `bash scripts/create_services_pod.sh`
+3. Run the app locally (inject env): `env $(grep -v '^#' .env.app | xargs) go run .`
+4. Access:
+   - App (when running): http://localhost:8080
+   - Postgres: localhost:5432
+   - MinIO API: http://localhost:9000
+   - MinIO Console: http://localhost:9090
+   - Nginx Cache: http://localhost:8081
+
+Set `RECREATE_POD=1` to force pod recreation.
 
 1. Export / set all required environment variables.
 2. Ensure Postgres and MinIO are running and accessible.
