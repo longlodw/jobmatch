@@ -59,7 +59,7 @@ else
 fi
 
 # Data directories
-HOST_BASE="${REPO_DIR}/pod_data_services"
+HOST_BASE="${REPO_DIR}/.pod_data_services"
 mkdir -p "${HOST_BASE}/pgvector" "${HOST_BASE}/minio" "${HOST_BASE}/nginx/cache" "${HOST_BASE}/nginx/conf"
 
 # Start services using helpers

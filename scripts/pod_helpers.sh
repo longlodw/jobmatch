@@ -52,7 +52,7 @@ start_nginx_cache() {
   mkdir -p "$conf_dir" "$cache_dir"
   if [ ! -f "$conf_file" ]; then
     cat > "$conf_file" <<'EOF'
-# Nginx reverse proxy + cache for remote job fetcher
+# Nginx reverse proxy + cache
 user  nginx;
 worker_processes  auto;
 error_log  /var/log/nginx/error.log warn;
@@ -61,35 +61,50 @@ pid        /var/run/nginx.pid;
 events { worker_connections 1024; }
 
 http {
-  proxy_cache_path /cache levels=1:2 keys_zone=jobfetcher_cache:10m max_size=500m inactive=30m use_temp_path=off;
+  proxy_cache_path /cache levels=1:2 keys_zone=cache:10m max_size=500m inactive=30m use_temp_path=off;
   server {
     listen 8081;
     # Adjust upstream origin below to the real job fetcher endpoint if not local
     set $jobfetcher_origin https://api.apify.com/v2/acts/curious_coder~linkedin-jobs-scraper/run-sync-get-dataset-items;
-    location / {
+    set $embedding_origin https://api.openai.com/v1;
+    location /jobfetcher {
       proxy_pass $jobfetcher_origin;
+      proxy_cache_key "$scheme$request_method$request_uri|$request_body";
       proxy_set_header Host api.apify.com;
-      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-      proxy_cache jobfetcher_cache;
-      proxy_cache_valid 200 10m;
+      proxy_cache cache;
+      proxy_cache_valid 200 24h;
       proxy_cache_valid 404 1m;
       proxy_cache_bypass $http_cache_control;
+      proxy_cache_methods POST GET HEAD;
       add_header X-Cache-Status $upstream_cache_status;
+      resolver 8.8.8.8;
+    }
+    location /embedder {
+      proxy_pass $embedding_origin;
+      proxy_cache_key "$scheme$request_method$request_uri|$request_body";
+      proxy_set_header Host api.openai.com;
+      proxy_cache cache;
+      proxy_cache_valid 200 24h;
+      proxy_cache_valid 404 1m;
+      proxy_cache_bypass $http_cache_control;
+      proxy_cache_methods POST GET HEAD;
+      add_header X-Cache-Status $upstream_cache_status;
+      resolver 8.8.8.8;
     }
   }
 }
 EOF
   fi
-  if [ "$(podman container exists nginx-jobfetcher-cache && podman inspect -f '{{.State.Running}}' nginx-jobfetcher-cache 2>/dev/null || echo false)" != "true" ]; then
-    echo "(Re)starting nginx-jobfetcher-cache container"
-    if podman container exists nginx-jobfetcher-cache; then podman rm -f nginx-jobfetcher-cache >/dev/null 2>&1 || true; fi
+  if [ "$(podman container exists nginx-cache && podman inspect -f '{{.State.Running}}' nginx-cache 2>/dev/null || echo false)" != "true" ]; then
+    echo "(Re)starting nginx-cache container"
+    if podman container exists nginx-cache; then podman rm -f nginx-cache >/dev/null 2>&1 || true; fi
     podman run -d --restart=always --pod "$pod_name" \
-      --name nginx-jobfetcher-cache \
+      --name nginx-cache \
       --env-file "$env_file" \
       -v "${conf_dir}:/etc/nginx" \
       -v "${cache_dir}:/cache" \
       "$image"
   else
-    echo "nginx-jobfetcher-cache container already running"
+    echo "nginx-cache container already running"
   fi
 }
