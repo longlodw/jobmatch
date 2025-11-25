@@ -22,6 +22,7 @@ type IOAuth interface {
 	Exchange(ctx context.Context, code, codeVerifier string) (*oauth2.Token, error)
 	VerifyIDToken(ctx context.Context, idToken string) (*oidc.IDToken, error)
 	Refresh(ctx context.Context, refreshToken string) (*oauth2.Token, error)
+	Config() *oauth2.Config
 }
 
 type IDrive interface {
@@ -55,13 +56,8 @@ func NewGoogleOAuth(ctx context.Context, clientID, clientSecret, redirectURL str
 }
 
 func (g *GoogleOAuth) Initiate(scopes []string) (authUrl, state, codeVerifier string, err error) {
-	config := &oauth2.Config{
-		ClientID:     g.clientID,
-		ClientSecret: g.clientSecret,
-		RedirectURL:  g.redirectURL,
-		Scopes:       scopes,
-		Endpoint:     google.Endpoint,
-	}
+	config := g.Config()
+	config.Scopes = scopes
 	codeVerifier, codeChallenge, err := generateCodePair()
 	if err != nil {
 		return
@@ -72,12 +68,7 @@ func (g *GoogleOAuth) Initiate(scopes []string) (authUrl, state, codeVerifier st
 }
 
 func (g *GoogleOAuth) Exchange(ctx context.Context, code, codeVerifier string) (*oauth2.Token, error) {
-	config := &oauth2.Config{
-		ClientID:     g.clientID,
-		ClientSecret: g.clientSecret,
-		RedirectURL:  g.redirectURL,
-		Endpoint:     google.Endpoint,
-	}
+	config := g.Config()
 	token, err := config.Exchange(ctx, code, oauth2.SetAuthURLParam("code_verifier", codeVerifier))
 	if err != nil {
 		return nil, err
@@ -95,18 +86,22 @@ func (g *GoogleOAuth) VerifyIDToken(ctx context.Context, idToken string) (*oidc.
 }
 
 func (g *GoogleOAuth) Refresh(ctx context.Context, refreshToken string) (*oauth2.Token, error) {
-	config := &oauth2.Config{
-		ClientID:     g.clientID,
-		ClientSecret: g.clientSecret,
-		RedirectURL:  g.redirectURL,
-		Endpoint:     google.Endpoint,
-	}
+	config := g.Config()
 	tokSrc := config.TokenSource(ctx, &oauth2.Token{RefreshToken: refreshToken})
 	newToken, err := tokSrc.Token()
 	if err != nil {
 		return nil, err
 	}
 	return newToken, nil
+}
+
+func (g *GoogleOAuth) Config() *oauth2.Config {
+	return &oauth2.Config{
+		ClientID:     g.clientID,
+		ClientSecret: g.clientSecret,
+		RedirectURL:  g.redirectURL,
+		Endpoint:     google.Endpoint,
+	}
 }
 
 func ExtractIDToken(token *oauth2.Token) (string, error) {
@@ -122,13 +117,14 @@ type GoogleDrive struct {
 	sheetsService *sheets.Service
 }
 
-func NewGoogleDrive(ctx context.Context, oauthToken *oauth2.Token) (*GoogleDrive, error) {
-	ts := oauth2.StaticTokenSource(oauthToken)
-	driveSrv, err := drive.NewService(ctx, option.WithTokenSource(ts))
+func NewGoogleDrive(ctx context.Context, oauth IOAuth, oauthToken *oauth2.Token) (*GoogleDrive, error) {
+	config := oauth.Config()
+	client := config.Client(ctx, oauthToken)
+	driveSrv, err := drive.NewService(ctx, option.WithHTTPClient(client))
 	if err != nil {
 		return nil, err
 	}
-	sheetsSrv, err := sheets.NewService(ctx, option.WithTokenSource(ts))
+	sheetsSrv, err := sheets.NewService(ctx, option.WithHTTPClient(client))
 	if err != nil {
 		return nil, err
 	}
