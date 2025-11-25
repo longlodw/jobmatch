@@ -26,7 +26,7 @@ func NewEmbeder(baseUrl, apiKey string) *Embedder {
 func (e *Embedder) GetEmbedding(ctx context.Context, texts []string) ([][]float32, error) {
 	req := openai.EmbeddingRequest{
 		Input: texts,
-		Model: "gemini-embedding-001",
+		Model: "text-embedding-3-small",
 	}
 	resp, err := e.client.CreateEmbeddings(ctx, req)
 	if err != nil {
