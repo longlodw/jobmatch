@@ -9,6 +9,7 @@ require (
 	github.com/jackc/pgx/v5 v5.7.6
 	github.com/longlodw/lazyiterate v0.0.0-20250810231102-bfdbe1c491d3
 	github.com/minio/minio-go/v7 v7.0.97
+	github.com/pgvector/pgvector-go v0.3.0
 	github.com/pkoukk/tiktoken-go v0.1.8
 	github.com/sashabaranov/go-openai v1.41.2
 	go.uber.org/zap v1.27.1

@@ -10,6 +10,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/pgvector/pgvector-go"
 )
 
 const (
@@ -38,18 +39,16 @@ type EmbeddingScore struct {
 
 type IStorage interface {
 	InsertUser(ctx context.Context, id, refreshToken, accessToken string, tokenExpiry time.Time) error
-	UpdateUserSearchURL(ctx context.Context, id string, searchURL sql.NullString) error
+	UpdateUserSearchURL(ctx context.Context, id string, searchURL string) error
 	UpdateUserLastSearched(ctx context.Context, id string) error
 	SelectUserTokens(ctx context.Context, id string) (refreshToken, accessToken string, tokenExpiry time.Time, err error)
 	SelectUserSearchURL(ctx context.Context, id string) (searchURL sql.NullString, err error)
 	SelectUserLastSearched(ctx context.Context, id string) (lastSearched sql.NullTime, err error)
 
-	InsertResume(ctx context.Context, id, userID string) error
+	InsertResume(ctx context.Context, id, userID string, embeddings [][]float32) error
 	UpdateResumeTimestamp(ctx context.Context, id, userID string) error
 	SelectResumesByUser(ctx context.Context, userID string, offset int) (resumes []ResumeMetadata, err error)
 	SelectResumesByEmbedding(ctx context.Context, userID string, embedding []float32, topK int) (resumes []EmbeddingScore, err error)
-	InsertResumeEmbedding(ctx context.Context, resumeID string, embedding []float32) error
-	DeleteResumeEmbedding(ctx context.Context, resumeID string) error
 
 	InsertJob(ctx context.Context, id, userID, resumeID, jobContent string) error
 	UpdateJobStatus(ctx context.Context, id, userID, status string) error
@@ -107,25 +106,29 @@ func NewStorage(ctx context.Context, dbConnStr, pgSecret, minioEndpoint, minioAc
 			last_searched TIMESTAMPTZ DEFAULT NULL
 		);
 		CREATE TABLE IF NOT EXISTS resumes (
-			id TEXT PRIMARY KEY,
+			id TEXT NOT NULL,
 			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-			last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW()
+			last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (id, user_id)
 		);
 		CREATE INDEX IF NOT EXISTS user_id_to_resumes ON resumes (user_id);
 		CREATE TABLE IF NOT EXISTS jobs (
 			id TEXT NOT NULL,
-			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-			resume_id TEXT NOT NULL REFERENCES resumes(id) ON DELETE CASCADE,
+			user_id TEXT NOT NULL,
+			resume_id TEXT NOT NULL,
 			status TEXT NOT NULL,
 			last_updated TIMESTAMPTZ DEFAULT NOW(),
-			PRIMARY KEY (id, user_id)
+			PRIMARY KEY (id, user_id),
+			FOREIGN KEY (resume_id, user_id) REFERENCES resumes(id, user_id) ON DELETE CASCADE
 		);
 		CREATE INDEX IF NOT EXISTS user_id_status_to_jobs ON jobs (user_id, status);
 		CREATE EXTENSION IF NOT EXISTS pgcrypto;
 		CREATE EXTENSION IF NOT EXISTS vector;
 		CREATE TABLE IF NOT EXISTS resume_embeddings (
-			resume_id TEXT REFERENCES resumes(id) ON DELETE CASCADE,
-			embedding VECTOR(3072) NOT NULL
+			resume_id TEXT NOT NULL,
+			user_id TEXT NOT NULL,
+			embedding VECTOR(1536) NOT NULL,
+			FOREIGN KEY (resume_id, user_id) REFERENCES resumes(id, user_id) ON DELETE CASCADE
 		);
 		CREATE INDEX IF NOT EXISTS resume_id_to_embeddings ON resume_embeddings (resume_id);
 	`)
@@ -153,18 +156,12 @@ func (s *Storage) InsertUser(ctx context.Context, id, refreshToken, accessToken 
 	return err
 }
 
-func (s *Storage) UpdateUserSearchURL(ctx context.Context, id string, searchURL sql.NullString) error {
-	var searchVal any
-	if searchURL.Valid {
-		searchVal = searchURL.String
-	} else {
-		searchVal = nil
-	}
+func (s *Storage) UpdateUserSearchURL(ctx context.Context, id string, searchURL string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE users
 		SET search_url = $2
 		WHERE id = $1;
-	`, id, searchVal)
+	`, id, searchURL)
 	return err
 }
 
@@ -207,13 +204,45 @@ func (s *Storage) SelectUserLastSearched(ctx context.Context, id string) (lastSe
 	return
 }
 
-func (s *Storage) InsertResume(ctx context.Context, id, userID string) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO resumes (id, user_id)
-		VALUES ($1, $2)
-		ON CONFLICT (id, user_id) DO NOTHING;
+func (s *Storage) InsertResume(ctx context.Context, id, userID string, embedding [][]float32) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO resumes (id, user_id, last_updated)
+		VALUES ($1, $2, NOW())
+		ON CONFLICT (id, user_id) DO UPDATE SET last_updated = NOW();
 	`, id, userID)
-	return err
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
+		DELETE FROM resume_embeddings
+		WHERE resume_id = $1;
+	`, id)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO resume_embeddings (resume_id, user_id, embedding)
+		VALUES ($1, $2, $3);
+	`)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	defer stmt.Close()
+	for _, emb := range embedding {
+		_, err = stmt.ExecContext(ctx, id, userID, pgvector.NewVector(emb))
+		if err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Storage) UpdateResumeTimestamp(ctx context.Context, id, userID string) error {
@@ -268,7 +297,7 @@ func (s *Storage) SelectResumesByEmbedding(ctx context.Context, userID string, e
 		GROUP BY r.id
 		ORDER BY similarity DESC
 		LIMIT $4;
-	`, embedding, userID, topK)
+	`, pgvector.NewVector(embedding), userID, topK)
 	if err != nil {
 		return nil, err
 	}
@@ -285,23 +314,6 @@ func (s *Storage) SelectResumesByEmbedding(ctx context.Context, userID string, e
 		})
 	}
 	return resumes, rows.Err()
-}
-
-func (s *Storage) InsertResumeEmbedding(ctx context.Context, resumeID string, embedding []float32) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO resume_embeddings (resume_id, embedding)
-		VALUES ($1, $2)
-		ON CONFLICT (resume_id) DO UPDATE SET embedding = EXCLUDED.embedding;
-	`, resumeID, embedding)
-	return err
-}
-
-func (s *Storage) DeleteResumeEmbedding(ctx context.Context, resumeID string) error {
-	_, err := s.db.ExecContext(ctx, `
-		DELETE FROM resume_embeddings
-		WHERE resume_id = $1;
-	`, resumeID)
-	return err
 }
 
 func (s *Storage) InsertJob(ctx context.Context, id, userID, resumeID, jobContent string) error {
@@ -400,4 +412,6 @@ func (s *Storage) DeleteCode(ctx context.Context, state string) error {
 	return s.minioClient.RemoveObject(ctx, s.bucketName, "codes/"+state+".txt", minio.RemoveObjectOptions{})
 }
 
-func (s *Storage) Close() error { return s.db.Close() }
+func (s *Storage) Close() error {
+	return s.db.Close()
+}

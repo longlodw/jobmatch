@@ -26,7 +26,6 @@ type JobData struct {
 
 type Service struct {
 	oAuth          IOAuth
-	driveOAuth     IOAuth
 	storage        IStorage
 	jobFetcher     IJobFetcher
 	embedder       IEmbedder
@@ -105,12 +104,12 @@ func (s *Service) RefreshToken(ctx context.Context, userID string) (idToken, ref
 	s.logger.Info("refreshing token", zap.String("userID", userID))
 	refreshToken, _, _, err = s.storage.SelectUserTokens(ctx, userID)
 	if err != nil {
-		s.logger.Error("failed to get refresh token", zap.Error(err))
+		s.logger.Error("failed to get refresh token", zap.String("userID", userID), zap.Error(err))
 		return "", "", "", http.StatusInternalServerError, err
 	}
 	newToken, err := s.oAuth.Refresh(ctx, refreshToken)
 	if err != nil {
-		s.logger.Error("failed to refresh token", zap.Error(err))
+		s.logger.Error("failed to refresh token", zap.String("userID", userID), zap.Error(err))
 		return "", "", "", http.StatusInternalServerError, err
 	}
 	idToken = newToken.Extra("id_token").(string)
@@ -118,12 +117,12 @@ func (s *Service) RefreshToken(ctx context.Context, userID string) (idToken, ref
 	refreshToken = newToken.RefreshToken
 	err = s.storage.InsertUser(ctx, userID, refreshToken, accessToken, newToken.Expiry)
 	if err != nil {
-		s.logger.Error("failed to update user tokens", zap.Error(err))
+		s.logger.Error("failed to update user tokens", zap.String("userID", userID), zap.Error(err))
 		return "", "", "", http.StatusInternalServerError, err
 	}
 	newIDToken, err := ExtractIDToken(newToken)
 	if err != nil {
-		s.logger.Error("failed to extract new ID token", zap.Error(err))
+		s.logger.Error("failed to extract new ID token", zap.String("userID", userID), zap.Error(err))
 		return "", "", "", http.StatusInternalServerError, err
 	}
 	s.logger.Info("token refreshed successfully", zap.String("userID", userID))
@@ -132,10 +131,9 @@ func (s *Service) RefreshToken(ctx context.Context, userID string) (idToken, ref
 
 func (s *Service) SetSearchURL(ctx context.Context, userID, searchURL string) (int, error) {
 	s.logger.Info("setting search URL", zap.String("userID", userID), zap.String("searchURL", searchURL))
-	nullSearch := sql.NullString{String: searchURL, Valid: searchURL != ""}
-	err := s.storage.UpdateUserSearchURL(ctx, userID, nullSearch)
+	err := s.storage.UpdateUserSearchURL(ctx, userID, searchURL)
 	if err != nil {
-		s.logger.Error("failed to set search URL", zap.Error(err))
+		s.logger.Error("failed to set search URL", zap.String("userID", userID), zap.Error(err))
 		return http.StatusInternalServerError, err
 	}
 	s.logger.Info("search URL set successfully", zap.String("userID", userID))
@@ -146,7 +144,7 @@ func (s *Service) GetSearchURL(ctx context.Context, userID string) (string, int,
 	s.logger.Info("getting search URL", zap.String("userID", userID))
 	searchUrl, err := s.storage.SelectUserSearchURL(ctx, userID)
 	if err != nil {
-		s.logger.Error("failed to get search URL", zap.Error(err))
+		s.logger.Error("failed to get search URL", zap.String("userID", userID), zap.Error(err))
 		return searchUrl.String, http.StatusInternalServerError, err
 	}
 	s.logger.Info("search URL retrieved successfully", zap.String("userID", userID), zap.String("searchURL", searchUrl.String))
@@ -157,7 +155,7 @@ func (s *Service) GetResumes(ctx context.Context, userID string, offset int) ([]
 	s.logger.Info("getting resumes", zap.String("userID", userID))
 	resume, err := s.storage.SelectResumesByUser(ctx, userID, offset)
 	if err != nil {
-		s.logger.Error("failed to get resumes", zap.Error(err))
+		s.logger.Error("failed to get resumes", zap.String("userID", userID), zap.Error(err))
 		return nil, http.StatusInternalServerError, err
 	}
 	s.logger.Info("resumes retrieved successfully", zap.String("userID", userID), zap.Int("count", len(resume)))
@@ -168,42 +166,26 @@ func (s *Service) UploadResume(ctx context.Context, userID, fileID string) (int,
 	s.logger.Info("uploading resume", zap.String("userID", userID), zap.String("fileID", fileID))
 	drive, httpStatus, err := s.driveForUser(ctx, userID)
 	if err != nil {
-		s.logger.Error("failed to get drive for user", zap.Error(err))
+		s.logger.Error("failed to get drive for user", zap.String("userID", userID), zap.Error(err))
 		return httpStatus, err
 	}
 	content, err := drive.ExportDocsAsText(ctx, fileID)
 	if err != nil {
-		s.logger.Error("failed to export resume content", zap.Error(err))
+		s.logger.Error("failed to export resume content", zap.String("userID", userID), zap.String("fileID", fileID), zap.Error(err))
 		return http.StatusBadRequest, err
 	}
 	chunks, err := ChunkText(content, 2000)
 	if err != nil {
-		s.logger.Error("failed to chunk resume content", zap.Error(err))
+		s.logger.Error("failed to chunk resume content", zap.String("userID", userID), zap.String("fileID", fileID), zap.Error(err))
 		return http.StatusInternalServerError, err
 	}
 	embeddingResumes, err := s.embedder.GetEmbedding(ctx, chunks)
 	if err != nil {
-		s.logger.Error("failed to get resume embeddings", zap.Error(err))
+		s.logger.Error("failed to get resume embeddings", zap.String("userID", userID), zap.String("fileID", fileID), zap.Error(err))
 		return http.StatusInternalServerError, err
 	}
-	wg := sync.WaitGroup{}
-	arrErr := make([]error, len(embeddingResumes))
-	for k, embeddingResume := range embeddingResumes {
-		wg.Add(1)
-		go func(i int, embeddingResume []float32) {
-			defer wg.Done()
-			// use fileID (resumeID) not userID
-			arrErr[i] = s.storage.InsertResumeEmbedding(ctx, fileID, embeddingResume)
-		}(k, embeddingResume)
-	}
-	wg.Wait()
-	err = errors.Join(arrErr...)
-	if err != nil {
-		s.logger.Error("failed to insert resume embeddings", zap.Error(err))
-		return http.StatusInternalServerError, err
-	}
-	if err := s.storage.InsertResume(ctx, fileID, userID); err != nil {
-		s.logger.Error("failed to insert resume", zap.Error(err))
+	if err := s.storage.InsertResume(ctx, fileID, userID, embeddingResumes); err != nil {
+		s.logger.Error("failed to insert resume", zap.String("userID", userID), zap.String("fileID", fileID), zap.Error(err))
 		return http.StatusInternalServerError, err
 	}
 	s.logger.Info("resume uploaded successfully", zap.String("userID", userID), zap.String("fileID", fileID))
@@ -214,16 +196,16 @@ func (s *Service) GetJobs(ctx context.Context, userID string, offset int, status
 	s.logger.Info("getting jobs", zap.String("userID", userID), zap.Int("offset", offset), zap.String("status", status))
 	drive, httpStatus, err := s.driveForUser(ctx, userID)
 	if err != nil {
-		s.logger.Error("failed to get drive for user", zap.Error(err))
+		s.logger.Error("failed to get drive for user", zap.String("userID", userID), zap.Error(err))
 		return nil, httpStatus, err
 	}
 	if st, err := s.fetchJobsIfNeeded(ctx, drive, userID); err != nil {
-		s.logger.Error("failed to fetch jobs", zap.Error(err))
+		s.logger.Error("failed to fetch jobs", zap.String("userID", userID), zap.Error(err))
 		return nil, st, err
 	}
 	jobs, err := s.storage.SelectJobByStatus(ctx, userID, status)
 	if err != nil {
-		s.logger.Error("failed to get jobs by status", zap.Error(err))
+		s.logger.Error("failed to get jobs by status", zap.String("userID", userID), zap.String("status", status), zap.Error(err))
 		return nil, http.StatusInternalServerError, err
 	}
 	s.logger.Info("jobs by status retrieved successfully", zap.String("userID", userID), zap.String("status", status), zap.Int("count", len(jobs)))
@@ -236,60 +218,60 @@ func (s *Service) UpdateJobStatus(ctx context.Context, userID, jobID, status str
 	case JobStatusInterested:
 		drive, httpStatus, err := s.driveForUser(ctx, userID)
 		if err != nil {
-			s.logger.Error("failed to get drive for user", zap.Error(err))
+			s.logger.Error("failed to get drive for user", zap.String("userID", userID), zap.Error(err))
 			return httpStatus, err
 		}
 		rootFolderID, err := drive.CreateFolderIfNotExists(ctx, s.rootFolderName, "")
 		if err != nil {
-			s.logger.Error("failed to create or get root folder", zap.Error(err))
+			s.logger.Error("failed to create or get root folder", zap.String("userID", userID), zap.Error(err))
 			return http.StatusInternalServerError, err
 		}
 		jobFolderID, err := drive.CreateFolderIfNotExists(ctx, jobID, rootFolderID)
 		if err != nil {
-			s.logger.Error("failed to create or get job folder", zap.Error(err))
+			s.logger.Error("failed to create or get job folder", zap.String("userID", userID), zap.String("rootFolderID", rootFolderID), zap.String("jobID", jobID), zap.Error(err))
 			return http.StatusInternalServerError, err
 		}
 		_, err = drive.CopyFile(ctx, jobID, jobFolderID)
 		if err != nil {
-			s.logger.Error("failed to copy job file to job folder", zap.Error(err))
+			s.logger.Error("failed to copy job file to job folder", zap.String("userID", userID), zap.String("jobID", jobID), zap.String("jobFolderID", jobFolderID), zap.Error(err))
 			return http.StatusInternalServerError, err
 		}
 		sheetId, err := drive.CreateSheetIfNotExists(ctx, "Job Details", rootFolderID)
 		if err != nil {
-			s.logger.Error("failed to create or get job details sheet", zap.Error(err))
+			s.logger.Error("failed to create or get job details sheet", zap.String("userID", userID), zap.String("rootFolderID", rootFolderID), zap.Error(err))
 			return http.StatusInternalServerError, err
 		}
 		jobContent, err := s.storage.GetJobContent(ctx, jobID)
 		if err != nil {
-			s.logger.Error("failed to get job content", zap.Error(err))
+			s.logger.Error("failed to get job content", zap.String("userID", userID), zap.String("jobID", jobID), zap.Error(err))
 			return http.StatusInternalServerError, err
 		}
 		jobFolderLink := drive.GetFileLink(jobFolderID)
 		var jobContentObj JobData
 		if err := json.Unmarshal([]byte(jobContent), &jobContentObj); err != nil {
-			s.logger.Error("failed to unmarshal job content", zap.Error(err))
+			s.logger.Error("failed to unmarshal job content", zap.String("userID", userID), zap.String("jobID", jobID), zap.Error(err))
 			return http.StatusInternalServerError, err
 		}
 		rowToInsert := [][]any{{jobContentObj.Title, jobContentObj.CompanyName, jobContentObj.Description, jobContentObj.Link, jobContentObj.PostedAt, jobFolderLink}}
 		if err := drive.InsertRows(ctx, sheetId, rowToInsert); err != nil {
-			s.logger.Error("failed to insert job details into sheet", zap.Error(err))
+			s.logger.Error("failed to insert job details into sheet", zap.String("userID", userID), zap.String("jobID", jobID), zap.String("sheetId", sheetId), zap.Error(err))
 			return http.StatusInternalServerError, err
 		}
 		if err := s.storage.UpdateJobStatus(ctx, userID, jobID, JobStatusInterested); err != nil {
-			s.logger.Error("failed to update job status to interested", zap.Error(err))
+			s.logger.Error("failed to update job status", zap.String("userID", userID), zap.String("jobID", jobID), zap.String("status", status), zap.Error(err))
 			return http.StatusInternalServerError, err
 		}
 		s.logger.Info("job status updated to interested successfully", zap.String("userID", userID), zap.String("jobID", jobID))
 		return http.StatusOK, nil
 	case JobStatusNotInterested:
 		if err := s.storage.UpdateJobStatus(ctx, userID, jobID, status); err != nil {
-			s.logger.Error("failed to update job status", zap.Error(err))
+			s.logger.Error("failed to update job status", zap.String("userID", userID), zap.String("jobID", jobID), zap.String("status", status), zap.Error(err))
 			return http.StatusInternalServerError, err
 		}
 		s.logger.Info("job status updated successfully", zap.String("userID", userID), zap.String("jobID", jobID), zap.String("status", status))
 		return http.StatusOK, nil
 	default:
-		s.logger.Error("invalid job status", zap.String("status", status))
+		s.logger.Error("invalid job status", zap.String("userID", userID), zap.String("jobID", jobID), zap.String("status", status))
 		return http.StatusBadRequest, errors.New("invalid job status")
 	}
 }
@@ -298,7 +280,7 @@ func (s *Service) GetJobDetails(ctx context.Context, userID, jobID string) (stri
 	s.logger.Info("getting job details", zap.String("userID", userID), zap.String("jobID", jobID))
 	jobContent, err := s.storage.GetJobContent(ctx, jobID)
 	if err != nil {
-		s.logger.Error("failed to get job content", zap.Error(err))
+		s.logger.Error("failed to get job content", zap.String("userID", userID), zap.String("jobID", jobID), zap.Error(err))
 		return "", http.StatusInternalServerError, err
 	}
 	s.logger.Info("job details retrieved successfully", zap.String("userID", userID), zap.String("jobID", jobID))
@@ -309,7 +291,7 @@ func (s *Service) fetchJobsIfNeeded(ctx context.Context, drive IDrive, userID st
 	s.logger.Info("checking if job fetch is needed", zap.String("userID", userID))
 	lastSearched, err := s.storage.SelectUserLastSearched(ctx, userID)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		s.logger.Error("failed to get user's last searched time", zap.Error(err))
+		s.logger.Error("failed to get user's last searched time", zap.String("userID", userID), zap.Error(err))
 		return http.StatusInternalServerError, err
 	}
 	if lastSearched.Valid && lastSearched.Time.After(time.Now().Add(-24*time.Hour)) {
@@ -318,7 +300,7 @@ func (s *Service) fetchJobsIfNeeded(ctx context.Context, drive IDrive, userID st
 	}
 	searchUrl, err := s.storage.SelectUserSearchURL(ctx, userID)
 	if err != nil {
-		s.logger.Error("failed to get user's search URL", zap.Error(err))
+		s.logger.Error("failed to get user's search URL", zap.String("userID", userID), zap.Error(err))
 		return http.StatusInternalServerError, err
 	}
 	if !searchUrl.Valid || searchUrl.String == "" {
@@ -327,13 +309,13 @@ func (s *Service) fetchJobsIfNeeded(ctx context.Context, drive IDrive, userID st
 	}
 	jobIdData, err := s.jobFetcher.Fetch(ctx, searchUrl.String)
 	if err != nil {
-		s.logger.Error("failed to fetch jobs", zap.Error(err))
+		s.logger.Error("failed to fetch jobs from search URL", zap.String("userID", userID), zap.String("searchURL", searchUrl.String), zap.Error(err))
 		return http.StatusInternalServerError, err
 	}
 	wg := sync.WaitGroup{}
 	resumes, err := s.storage.SelectResumesByUser(ctx, userID, -1)
 	if err != nil {
-		s.logger.Error("failed to get resumes for user", zap.Error(err))
+		s.logger.Error("failed to get resumes for user", zap.String("userID", userID), zap.Error(err))
 		return http.StatusInternalServerError, err
 	}
 	// Update resumes if modified in Google Drive
@@ -357,6 +339,13 @@ func (s *Service) fetchJobsIfNeeded(ctx context.Context, drive IDrive, userID st
 			}
 		}(k, resume)
 	}
+	wg.Wait()
+	err = errors.Join(arrErr...)
+	if err != nil {
+		s.logger.Error("failed to update resumes", zap.String("userID", userID), zap.Error(err))
+		return http.StatusInternalServerError, err
+	}
+	// Process fetched jobs
 
 	arrErr = make([]error, len(jobIdData))
 	for k, jobIdDatum := range jobIdData {
@@ -408,10 +397,11 @@ func (s *Service) fetchJobsIfNeeded(ctx context.Context, drive IDrive, userID st
 	wg.Wait()
 	err = errors.Join(arrErr...)
 	if err != nil {
+		s.logger.Error("failed to process fetched jobs", zap.String("userID", userID), zap.Error(err))
 		return http.StatusInternalServerError, err
 	}
 	if err := s.storage.UpdateUserLastSearched(ctx, userID); err != nil {
-		s.logger.Error("failed to update user's last searched time", zap.Error(err))
+		s.logger.Error("failed to update user's last searched time", zap.String("userID", userID), zap.Error(err))
 		return http.StatusInternalServerError, err
 	}
 	s.logger.Info("job fetch completed successfully", zap.String("userID", userID))
@@ -432,8 +422,8 @@ func (s *Service) driveForUser(ctx context.Context, userID string) (IDrive, int,
 		}
 	}
 	// Build oauth2.Token for drive client
-	oauthTok := &oauth2.Token{AccessToken: access, RefreshToken: refresh, Expiry: expiry}
-	drive, err := NewGoogleDrive(ctx, oauthTok)
+	oauthTok := &oauth2.Token{AccessToken: access, RefreshToken: refresh, Expiry: expiry, TokenType: "Bearer"}
+	drive, err := NewGoogleDrive(ctx, s.oAuth, oauthTok)
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}

@@ -58,7 +58,6 @@ func verifyAndGetUserID(r *http.Request, googleOAuth IOAuth) (string, error) {
 
 // helper to render error fragment consistently
 func fragmentError(w http.ResponseWriter, tmpl *template.Template, status int, msg string) {
-	zap.L().Error("fragment error", zap.Int("status", status), zap.String("message", msg))
 	w.WriteHeader(status)
 	_ = tmpl.ExecuteTemplate(w, "error_fragment", struct{ Message string }{Message: msg})
 }
@@ -160,7 +159,7 @@ func main() {
 	}
 	defer storage.Close()
 
-	jobFetcher := NewJobFetcher(jobFetcherURL, jobFetcherToken)
+	jobFetcher := NewJobFetcher(jobFetcherURL, jobFetcherToken, logger)
 	embedder := NewEmbeder(embedBaseURL, embedAPIKey)
 
 	webService := NewService(webOAuth, storage, jobFetcher, embedder, rootFolderName, logger)
@@ -289,6 +288,7 @@ func main() {
 	mux.HandleFunc("/job/details", requireAuth(logger, webOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
 		jobID := r.URL.Query().Get("id")
 		if jobID == "" {
+			logger.Info("missing job id in details request", zap.String("uid", uid))
 			fragmentError(w, tmpl, http.StatusBadRequest, "missing id")
 			return
 		}
@@ -311,15 +311,18 @@ func main() {
 	// update job status (htmx)
 	mux.HandleFunc("/job/status", requireAuth(logger, webOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
 		if r.Method != http.MethodPost {
+			logger.Info("invalid method on job status update", zap.String("method", r.Method), zap.String("uid", uid))
 			fragmentError(w, tmpl, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 		if !validateCSRF(r) {
+			logger.Info("invalid CSRF on job status update", zap.String("uid", uid))
 			fragmentError(w, tmpl, http.StatusForbidden, "bad csrf")
 			return
 		}
 		refreshCSRFCookie(w, r)
 		if err := r.ParseForm(); err != nil {
+			logger.Info("bad form on job status update", zap.String("uid", uid), zap.Error(err))
 			fragmentError(w, tmpl, http.StatusBadRequest, "bad form")
 			return
 		}
@@ -330,7 +333,6 @@ func main() {
 			return
 		}
 		if st2, err := webService.UpdateJobStatus(r.Context(), uid, jobID, status); err != nil {
-			logger.Error("update job status failed", zap.Error(err), zap.String("jobID", jobID), zap.String("uid", uid), zap.String("status", status))
 			fragmentError(w, tmpl, st2, err.Error())
 			return
 		}
@@ -366,30 +368,34 @@ func main() {
 	// upload resume (htmx target)
 	mux.HandleFunc("/resumes/upload", requireAuth(logger, webOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
 		if r.Method != http.MethodPost {
+			logger.Info("invalid method on resume upload", zap.String("method", r.Method), zap.String("uid", uid))
 			fragmentError(w, tmpl, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 		if !validateCSRF(r) {
+			logger.Info("invalid CSRF on resume upload", zap.String("uid", uid))
 			fragmentError(w, tmpl, http.StatusForbidden, "bad csrf")
 			return
 		}
 		refreshCSRFCookie(w, r)
 		if err := r.ParseForm(); err != nil {
+			logger.Info("bad form on resume upload", zap.String("uid", uid), zap.Error(err))
 			fragmentError(w, tmpl, http.StatusBadRequest, "bad form")
 			return
 		}
 		fileID := r.Form.Get("fileID")
 		if fileID == "" {
+			logger.Info("missing fileID on resume upload", zap.String("uid", uid))
 			fragmentError(w, tmpl, http.StatusBadRequest, "missing fileID")
 			return
 		}
 		if _, err := webService.UploadResume(r.Context(), uid, fileID); err != nil {
-			logger.Error("resume upload failed", zap.Error(err), zap.String("fileID", fileID), zap.String("uid", uid))
 			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
 			return
 		}
 		logger.Info("resume uploaded", zap.String("fileID", fileID), zap.String("uid", uid))
 		if err := tmpl.ExecuteTemplate(w, "success_fragment", struct{ Message string }{Message: "Resume uploaded."}); err != nil {
+			logger.Error("resume upload success fragment error", zap.String("uid", uid), zap.Error(err))
 			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
 		}
 	}))
@@ -397,11 +403,16 @@ func main() {
 	// settings fragment (CSRF required even on GET)
 	mux.HandleFunc("/settings", func(w http.ResponseWriter, r *http.Request) {
 		if !validateCSRF(r) {
+			logger.Info("invalid CSRF on settings fetch")
 			fragmentError(w, tmpl, http.StatusForbidden, "bad csrf")
 			return
 		}
 		refreshCSRFCookie(w, r)
-		uid, _, _ := getIDTokenSubject(r, webOAuth, logger) // optional
+		uid, st, err := getIDTokenSubject(r, webOAuth, logger)
+		if err != nil && st != http.StatusUnauthorized {
+			fragmentError(w, tmpl, st, err.Error())
+			return
+		}
 		var searchURL string
 		if uid != "" {
 			url, _, err := webService.GetSearchURL(r.Context(), uid)
@@ -421,35 +432,40 @@ func main() {
 	// settings save search URL
 	mux.HandleFunc("/settings/search", requireAuth(logger, webOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
 		if r.Method != http.MethodPost {
+			logger.Info("invalid method on search URL save", zap.String("method", r.Method))
 			fragmentError(w, tmpl, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 		if !validateCSRF(r) {
+			logger.Info("invalid CSRF on search URL save", zap.String("uid", uid))
 			fragmentError(w, tmpl, http.StatusForbidden, "bad csrf")
 			return
 		}
 		refreshCSRFCookie(w, r)
 		if err := r.ParseForm(); err != nil {
+			logger.Info("bad form on search URL save", zap.String("uid", uid), zap.Error(err))
 			fragmentError(w, tmpl, http.StatusBadRequest, "bad form")
 			return
 		}
 		searchURL := r.Form.Get("searchURL")
 		if searchURL == "" {
+			logger.Info("missing search URL on save", zap.String("uid", uid))
 			fragmentError(w, tmpl, http.StatusBadRequest, "missing searchURL")
 			return
 		}
 		if st2, err := webService.SetSearchURL(r.Context(), uid, searchURL); err != nil {
-			logger.Error("save search URL failed", zap.Error(err), zap.String("uid", uid))
 			fragmentError(w, tmpl, st2, err.Error())
 			return
 		}
 		logger.Info("search URL saved", zap.String("uid", uid))
 		if err := tmpl.ExecuteTemplate(w, "success_fragment", struct{ Message string }{Message: "Search URL saved."}); err != nil {
+			logger.Error("search URL save success fragment error", zap.String("uid", uid), zap.Error(err))
 			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
 		}
 	}))
 	mux.HandleFunc("/api/login", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
+			logger.Info("invalid method on api login", zap.String("method", r.Method))
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
@@ -458,6 +474,7 @@ func main() {
 	})
 	mux.HandleFunc("/api/login/callback", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
+			logger.Info("invalid method on api login callback", zap.String("method", r.Method))
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
@@ -468,6 +485,7 @@ func main() {
 	})
 	mux.HandleFunc("/api/token/refresh", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
+			logger.Info("invalid method on api token refresh", zap.String("method", r.Method))
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
@@ -501,11 +519,13 @@ func main() {
 			st, err := apiService.SetSearchURL(r.Context(), uid, body.SearchURL)
 			writeJSON(w, st, map[string]string{"status": "updated"}, err)
 		default:
+			logger.Info("invalid method on api search URL", zap.String("method", r.Method))
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
 	})
 	mux.HandleFunc("/api/resumes", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
+			logger.Info("invalid method on api get resumes", zap.String("method", r.Method))
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
@@ -520,6 +540,7 @@ func main() {
 	})
 	mux.HandleFunc("/api/resume/upload", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
+			logger.Info("invalid method on api resume upload", zap.String("method", r.Method))
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
@@ -533,6 +554,7 @@ func main() {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		if body.FileID == "" {
+			logger.Info("missing fileID on api resume upload", zap.String("uid", uid))
 			writeJSON(w, http.StatusBadRequest, nil, errMissing("fileID"))
 			return
 		}
@@ -541,6 +563,7 @@ func main() {
 	})
 	mux.HandleFunc("/api/jobs", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
+			logger.Info("invalid method on api get jobs", zap.String("method", r.Method))
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
@@ -549,18 +572,25 @@ func main() {
 			writeJSON(w, http.StatusUnauthorized, nil, verr)
 			return
 		}
-		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+		offset, err := strconv.Atoi(r.URL.Query().Get("offset"))
+		if err != nil {
+			logger.Info("invalid offset on api get jobs", zap.String("offset", r.URL.Query().Get("offset")), zap.String("uid", uid))
+			writeJSON(w, http.StatusBadRequest, map[string]string{"offset": r.URL.Query().Get("offset")}, errMissing("offset"))
+			return
+		}
 		// always pending for API
 		jobs, st, err := apiService.GetJobs(r.Context(), uid, offset, JobStatusPending)
 		writeJSON(w, st, map[string]any{"jobs": jobs}, err)
 	})
 	mux.HandleFunc("/api/job/status", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
+			logger.Info("invalid method on api job status update", zap.String("method", r.Method))
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
 		uid, verr := verifyAndGetUserID(r, apiOAuth)
 		if verr != nil {
+			logger.Info("unauthorized api job status update attempt")
 			writeJSON(w, http.StatusUnauthorized, nil, verr)
 			return
 		}
@@ -575,6 +605,7 @@ func main() {
 	})
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
+			logger.Info("invalid method on health check", zap.String("method", r.Method))
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
@@ -585,16 +616,19 @@ func main() {
 
 	mux.HandleFunc("/api/job/details", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
+			logger.Info("invalid method on api job details", zap.String("method", r.Method))
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
 		uid, verr := verifyAndGetUserID(r, apiOAuth)
 		if verr != nil {
+			logger.Info("unauthorized api job details attempt")
 			writeJSON(w, http.StatusUnauthorized, nil, verr)
 			return
 		}
 		jobID := r.URL.Query().Get("jobID")
 		if jobID == "" {
+			logger.Info("missing jobID on api job details", zap.String("uid", uid))
 			writeJSON(w, http.StatusBadRequest, nil, errMissing("jobID"))
 			return
 		}
@@ -616,7 +650,7 @@ func main() {
 	ctxShutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := server.Shutdown(ctxShutdown); err != nil {
-		logger.Error("graceful shutdown failed", zap.Error(err))
+		logger.Fatal("server shutdown failed", zap.Error(err))
 	}
 	logger.Info("server stopped")
 }
