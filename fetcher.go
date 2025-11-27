@@ -11,12 +11,7 @@ import (
 )
 
 type IJobFetcher interface {
-	Fetch(ctx context.Context, searchUrl string) ([]IdMarshaledJob, error)
-}
-
-type IdMarshaledJob struct {
-	json.RawMessage
-	Id string `json:"id"`
+	Fetch(ctx context.Context, searchUrl string) ([]json.RawMessage, error)
 }
 
 type JobFetcher struct {
@@ -33,7 +28,7 @@ func NewJobFetcher(urlStr, token string, logger *zap.Logger) *JobFetcher {
 	}
 }
 
-func (jf *JobFetcher) Fetch(ctx context.Context, searchUrl string) ([]IdMarshaledJob, error) {
+func (jf *JobFetcher) Fetch(ctx context.Context, searchUrl string) ([]json.RawMessage, error) {
 	bodyObj := map[string]any{
 		"count":        100,
 		"urls":         []string{searchUrl},
@@ -51,7 +46,7 @@ func (jf *JobFetcher) Fetch(ctx context.Context, searchUrl string) ([]IdMarshale
 		return nil, err
 	}
 	defer resp.Body.Close()
-	var jobs []IdMarshaledJob
+	var jobs []json.RawMessage
 	decoder := json.NewDecoder(resp.Body)
 	err = decoder.Decode(&jobs)
 	if err != nil {

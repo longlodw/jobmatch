@@ -27,7 +27,7 @@ type JobMetadata struct {
 	LastUpdate time.Time
 }
 
-type ResumeMetadata struct {
+type ResumeMetaData struct {
 	ID          string
 	LastUpdated time.Time
 }
@@ -47,8 +47,9 @@ type IStorage interface {
 
 	InsertResume(ctx context.Context, id, userID string, embeddings [][]float32) error
 	UpdateResumeTimestamp(ctx context.Context, id, userID string) error
-	SelectResumesByUser(ctx context.Context, userID string, offset int) (resumes []ResumeMetadata, err error)
+	SelectResumesByUser(ctx context.Context, userID string, offset int) (resumes []ResumeMetaData, err error)
 	SelectResumesByEmbedding(ctx context.Context, userID string, embedding []float32, topK int) (resumes []EmbeddingScore, err error)
+	DeleteResume(ctx context.Context, id, userID string) error
 
 	InsertJob(ctx context.Context, id, userID, resumeID, jobContent string) error
 	UpdateJobStatus(ctx context.Context, id, userID, status string) error
@@ -127,10 +128,11 @@ func NewStorage(ctx context.Context, dbConnStr, pgSecret, minioEndpoint, minioAc
 		CREATE TABLE IF NOT EXISTS resume_embeddings (
 			resume_id TEXT NOT NULL,
 			user_id TEXT NOT NULL,
-			embedding VECTOR(1536) NOT NULL,
+			embedding VECTOR(384) NOT NULL,
 			FOREIGN KEY (resume_id, user_id) REFERENCES resumes(id, user_id) ON DELETE CASCADE
 		);
 		CREATE INDEX IF NOT EXISTS resume_id_to_embeddings ON resume_embeddings (resume_id);
+		CREATE INDEX IF NOT EXISTS embedding_vector_index ON resume_embeddings USING ivfflat (embedding vector_l2_ops) WITH (lists = 100);
 	`)
 	if err != nil {
 		return nil, err
@@ -254,7 +256,7 @@ func (s *Storage) UpdateResumeTimestamp(ctx context.Context, id, userID string) 
 	return err
 }
 
-func (s *Storage) SelectResumesByUser(ctx context.Context, userID string, offset int) (resumes []ResumeMetadata, err error) {
+func (s *Storage) SelectResumesByUser(ctx context.Context, userID string, offset int) (resumes []ResumeMetaData, err error) {
 	var rows *sql.Rows
 	if offset < 0 {
 		rows, err = s.db.QueryContext(ctx, `
@@ -280,7 +282,7 @@ func (s *Storage) SelectResumesByUser(ctx context.Context, userID string, offset
 		if err := rows.Scan(&id, &lastUpdated); err != nil {
 			return nil, err
 		}
-		resumes = append(resumes, ResumeMetadata{
+		resumes = append(resumes, ResumeMetaData{
 			ID:          id,
 			LastUpdated: lastUpdated,
 		})
@@ -290,10 +292,10 @@ func (s *Storage) SelectResumesByUser(ctx context.Context, userID string, offset
 
 func (s *Storage) SelectResumesByEmbedding(ctx context.Context, userID string, embedding []float32, topK int) (resumes []EmbeddingScore, err error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT r.id AS id, avg(1 - (re.embedding <=> $2)) AS similarity
+		SELECT r.id AS id, max(1 - (re.embedding <#> $2)) AS similarity
 		FROM resumes r
 		JOIN resume_embeddings re ON r.id = re.resume_id
-		WHERE r.user_id = $3 AND (re.embedding <=> $2) < 0.3
+		WHERE r.user_id = $3
 		GROUP BY r.id
 		ORDER BY similarity DESC
 		LIMIT $4;
@@ -314,6 +316,14 @@ func (s *Storage) SelectResumesByEmbedding(ctx context.Context, userID string, e
 		})
 	}
 	return resumes, rows.Err()
+}
+
+func (s *Storage) DeleteResume(ctx context.Context, id, userID string) error {
+	_, err := s.db.ExecContext(ctx, `
+		DELETE FROM resumes
+		WHERE id = $1 AND user_id = $2;
+	`, id, userID)
+	return err
 }
 
 func (s *Storage) InsertJob(ctx context.Context, id, userID, resumeID, jobContent string) error {

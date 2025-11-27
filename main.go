@@ -163,7 +163,9 @@ func main() {
 	embedder := NewEmbeder(embedBaseURL, embedAPIKey)
 
 	webService := NewService(webOAuth, storage, jobFetcher, embedder, rootFolderName, logger)
+	defer webService.Shutdown()
 	apiService := NewService(apiOAuth, storage, jobFetcher, embedder, rootFolderName, logger)
+	defer apiService.Shutdown()
 
 	// parse templates (include all fragments)
 	tmpl, err := template.ParseFiles(
@@ -347,7 +349,7 @@ func main() {
 	// resumes fragment
 	mux.HandleFunc("/resumes", func(w http.ResponseWriter, r *http.Request) {
 		uid, _, _ := getIDTokenSubject(r, webOAuth, logger) // optional
-		var resumes any
+		var resumes []ResumeMetaData
 		if uid != "" {
 			res, _, err := webService.GetResumes(r.Context(), uid, 0)
 			if err != nil {
@@ -358,7 +360,7 @@ func main() {
 		}
 		data := struct {
 			Authenticated bool
-			Resumes       any
+			Resumes       []ResumeMetaData
 		}{Authenticated: uid != "", Resumes: resumes}
 		if err := tmpl.ExecuteTemplate(w, "resumes", data); err != nil {
 			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
@@ -398,6 +400,39 @@ func main() {
 			logger.Error("resume upload success fragment error", zap.String("uid", uid), zap.Error(err))
 			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
 		}
+	}))
+
+	// delete resume (htmx target)
+	mux.HandleFunc("/resumes/delete", requireAuth(logger, webOAuth, tmpl, func(w http.ResponseWriter, r *http.Request, uid string) {
+		if r.Method != http.MethodPost {
+			logger.Info("invalid method on resume delete", zap.String("method", r.Method), zap.String("uid", uid))
+			fragmentError(w, tmpl, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		if !validateCSRF(r) {
+			logger.Info("invalid CSRF on resume delete", zap.String("uid", uid))
+			fragmentError(w, tmpl, http.StatusForbidden, "bad csrf")
+			return
+		}
+		refreshCSRFCookie(w, r)
+		if err := r.ParseForm(); err != nil {
+			logger.Info("bad form on resume delete", zap.String("uid", uid), zap.Error(err))
+			fragmentError(w, tmpl, http.StatusBadRequest, "bad form")
+			return
+		}
+		resumeID := r.Form.Get("resumeID")
+		if resumeID == "" {
+			logger.Info("missing resumeID on resume delete", zap.String("uid", uid))
+			fragmentError(w, tmpl, http.StatusBadRequest, "missing resumeID")
+			return
+		}
+		if st2, err := webService.DeleteResume(r.Context(), uid, resumeID); err != nil {
+			fragmentError(w, tmpl, st2, err.Error())
+			return
+		}
+		logger.Info("resume deleted", zap.String("resumeID", resumeID), zap.String("uid", uid))
+		// return empty 200 OK; hx-swap outerHTML on target will remove element
+		w.WriteHeader(http.StatusOK)
 	}))
 
 	// settings fragment (CSRF required even on GET)
@@ -538,28 +573,43 @@ func main() {
 		resumes, st, err := apiService.GetResumes(r.Context(), uid, offset)
 		writeJSON(w, st, map[string]any{"resumes": resumes}, err)
 	})
-	mux.HandleFunc("/api/resume/upload", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			logger.Info("invalid method on api resume upload", zap.String("method", r.Method))
+	mux.HandleFunc("/api/resume", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			uid, verr := verifyAndGetUserID(r, apiOAuth)
+			if verr != nil {
+				writeJSON(w, http.StatusUnauthorized, nil, verr)
+				return
+			}
+			var body struct {
+				FileID string `json:"fileID"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body.FileID == "" {
+				logger.Info("missing fileID on api resume upload", zap.String("uid", uid))
+				writeJSON(w, http.StatusBadRequest, nil, errMissing("fileID"))
+				return
+			}
+			st, err := apiService.UploadResume(r.Context(), uid, body.FileID)
+			writeJSON(w, st, map[string]string{"status": "uploaded"}, err)
+		case http.MethodDelete:
+			uid, verr := verifyAndGetUserID(r, apiOAuth)
+			if verr != nil {
+				writeJSON(w, http.StatusUnauthorized, nil, verr)
+				return
+			}
+			resumeID := r.URL.Query().Get("resumeID")
+			if resumeID == "" {
+				logger.Info("missing resumeID on api resume delete", zap.String("uid", uid))
+				writeJSON(w, http.StatusBadRequest, nil, errMissing("resumeID"))
+				return
+			}
+			st, err := apiService.DeleteResume(r.Context(), uid, resumeID)
+			writeJSON(w, st, map[string]string{"status": "deleted"}, err)
+		default:
+			logger.Info("invalid method on api resume", zap.String("method", r.Method))
 			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
 		}
-		uid, verr := verifyAndGetUserID(r, apiOAuth)
-		if verr != nil {
-			writeJSON(w, http.StatusUnauthorized, nil, verr)
-			return
-		}
-		var body struct {
-			FileID string `json:"fileID"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		if body.FileID == "" {
-			logger.Info("missing fileID on api resume upload", zap.String("uid", uid))
-			writeJSON(w, http.StatusBadRequest, nil, errMissing("fileID"))
-			return
-		}
-		st, err := apiService.UploadResume(r.Context(), uid, body.FileID)
-		writeJSON(w, st, map[string]string{"status": "uploaded"}, err)
 	})
 	mux.HandleFunc("/api/jobs", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
