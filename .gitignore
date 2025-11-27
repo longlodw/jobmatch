@@ -1,5 +1,5 @@
 # Ignore environment variable files
 .env
 .env.*
-pod_data
-pod_data_services
+.pod_data
+.pod_data_services
