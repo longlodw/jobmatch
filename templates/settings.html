@@ -7,7 +7,7 @@
       <input name="searchURL" class="input" placeholder="Search URL" value="{{.SearchURL}}" required />
       <button>Save</button>
     </form>
-    <div id="searchStatus" class="help">Current: {{if .SearchURL}}{{.SearchURL}}{{else}}(none){{end}}</div>
+    <div id="searchStatus" class="help" style="max-width:100%;overflow:hidden;text-overflow:ellipsis;word-break:break-all;white-space:normal">Current: {{if .SearchURL}}{{.SearchURL}}{{else}}(none){{end}}</div>
 
     {{else}}
       <div class="help">Login to configure settings.</div>
