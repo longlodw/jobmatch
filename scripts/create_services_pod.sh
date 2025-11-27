@@ -16,6 +16,7 @@ NGINX_ENV_FILE="${REPO_DIR}/.env.nginx"
 POD_NAME="jobmatch-services-pod"
 POSTGRES_IMAGE="docker.io/ankane/pgvector:latest"
 MINIO_IMAGE="quay.io/minio/minio:latest"
+EMBEDDINGS_IMAGE="ghcr.io/substratusai/stapi:latest"
 NGINX_IMAGE="docker.io/library/nginx:latest"
 RECREATE_POD="${RECREATE_POD:-}"
 
@@ -49,7 +50,7 @@ if podman pod exists "$POD_NAME"; then
   if [ "$needs_recreate" -eq 1 ]; then
     echo "Recreating pod ${POD_NAME} with service port mappings"
     podman pod rm -f "$POD_NAME" >/dev/null 2>&1 || true
-    podman pod create --name "$POD_NAME" -p 5432:5432 -p 9000:9000 -p 9090:9090 -p 8081:8081
+    podman pod create --name "$POD_NAME" -p 5432:5432 -p 9000:9000 -p 9090:9090 -p 8081:8081 -p 9080:8080
   else
     echo "Pod ${POD_NAME} already exists with expected service ports (set RECREATE_POD=1 to force)"
   fi
@@ -65,6 +66,7 @@ mkdir -p "${HOST_BASE}/pgvector" "${HOST_BASE}/minio" "${HOST_BASE}/nginx/cache"
 # Start services using helpers
 start_pgvector "$POD_NAME" "$POSTGRES_ENV_FILE" "$HOST_BASE" "$POSTGRES_IMAGE"
 start_minio    "$POD_NAME" "$MINIO_ENV_FILE"    "$HOST_BASE" "$MINIO_IMAGE" ":9090"
+start_openai_embeddings "$POD_NAME" "$HOST_BASE" "$EMBEDDINGS_IMAGE"
 start_nginx_cache "$POD_NAME" "$NGINX_ENV_FILE" "$HOST_BASE" "$NGINX_IMAGE"
 
 # Summary
