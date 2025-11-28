@@ -163,9 +163,7 @@ func main() {
 	embedder := NewEmbeder(embedBaseURL, embedAPIKey)
 
 	webService := NewService(webOAuth, storage, jobFetcher, embedder, rootFolderName, logger)
-	defer webService.Shutdown()
 	apiService := NewService(apiOAuth, storage, jobFetcher, embedder, rootFolderName, logger)
-	defer apiService.Shutdown()
 
 	// parse templates (include all fragments)
 	tmpl, err := template.ParseFiles(
@@ -278,6 +276,7 @@ func main() {
 				logger.Warn("job content unmarshal failed", zap.Error(err), zap.String("jobID", jm.ID))
 				continue
 			}
+			jd.ResumeID = jm.ResumeID
 			jobDatas = append(jobDatas, jd)
 		}
 		data := struct{ Jobs any }{Jobs: jobDatas}
@@ -396,9 +395,19 @@ func main() {
 			return
 		}
 		logger.Info("resume uploaded", zap.String("fileID", fileID), zap.String("uid", uid))
-		if err := tmpl.ExecuteTemplate(w, "success_fragment", struct{ Message string }{Message: "Resume uploaded."}); err != nil {
-			logger.Error("resume upload success fragment error", zap.String("uid", uid), zap.Error(err))
+		// respond with updated resumes fragment
+		res, _, err := webService.GetResumes(r.Context(), uid, 0)
+		if err != nil {
 			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
+			return
+		}
+		data := struct {
+			Authenticated bool
+			Resumes       []ResumeMetaData
+		}{Authenticated: true, Resumes: res}
+		if err := tmpl.ExecuteTemplate(w, "resumes", data); err != nil {
+			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
+			return
 		}
 	}))
 
@@ -431,8 +440,20 @@ func main() {
 			return
 		}
 		logger.Info("resume deleted", zap.String("resumeID", resumeID), zap.String("uid", uid))
-		// return empty 200 OK; hx-swap outerHTML on target will remove element
-		w.WriteHeader(http.StatusOK)
+		// respond with updated resumes fragment
+		res, _, err := webService.GetResumes(r.Context(), uid, 0)
+		if err != nil {
+			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
+			return
+		}
+		data := struct {
+			Authenticated bool
+			Resumes       []ResumeMetaData
+		}{Authenticated: true, Resumes: res}
+		if err := tmpl.ExecuteTemplate(w, "resumes", data); err != nil {
+			fragmentError(w, tmpl, http.StatusInternalServerError, err.Error())
+			return
+		}
 	}))
 
 	// settings fragment (CSRF required even on GET)
