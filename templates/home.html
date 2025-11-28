@@ -1,16 +1,15 @@
 {{define "content"}}
-<div class="panel">
-  <div class="panel-header">
-    <div><strong>Jobs</strong><div class="help">Swipe through pending jobs</div></div>
-  </div>
-  <div class="panel-body">
-    {{if .Authenticated}}
-      <div id="jobs" hx-get="/jobs" hx-trigger="load"></div>
-    {{else}}
+{{if .Authenticated}}
+  <div id="main-area" hx-get="/jobs" hx-trigger="load"></div>
+{{else}}
+  <div class="panel">
+    <div class="panel-header">
+      <div><strong>Jobs</strong><div class="help">Swipe through pending jobs</div></div>
+    </div>
+    <div class="panel-body">
       <div class="help">Please login to view jobs.</div>
-    {{end}}
+    </div>
   </div>
-</div>
-<div id="details-area"></div>
+{{end}}
 {{if .Error}}<div class="alert">{{.Error}}</div>{{end}}
 {{end}}
