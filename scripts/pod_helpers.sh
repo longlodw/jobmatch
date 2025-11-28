@@ -47,7 +47,7 @@ start_minio() {
 }
 
 start_openai_embeddings() {
-  pod_name="$1"; host_base="$3"; image="$4"
+  pod_name="$1"; host_base="$2"; image="$3"
   if [ "$(podman container exists openai-embeddings && podman inspect -f '{{.State.Running}}' openai-embeddings 2>/dev/null || echo false)" != "true" ]; then
     echo "(Re)starting openai-embeddings container"
     if podman container exists openai-embeddings; then podman rm -f openai-embeddings >/dev/null 2>&1 || true; fi
@@ -56,46 +56,5 @@ start_openai_embeddings() {
       "$image"
   else
     echo "openai-embeddings container already running"
-  fi
-}
-
-start_nginx_cache() {
-  pod_name="$1"; env_file="$2"; host_base="$3"; image="$4"
-  conf_dir="${host_base}/nginx/conf"; cache_dir="${host_base}/nginx/cache"; conf_file="${conf_dir}/nginx.conf"
-  mkdir -p "$conf_dir" "$cache_dir"
-  if [ ! -f "$conf_file" ]; then
-    cat > "$conf_file" <<'EOF'
-# Nginx reverse proxy + cache
-user  nginx;
-worker_processes  auto;
-error_log  /var/log/nginx/error.log warn;
-pid        /var/run/nginx.pid;
-
-events { worker_connections 1024; }
-
-http {
-  log_format verbose '$remote_addr $request $status $upstream_cache_status';
-  server {
-    listen 8081;
-    location /jobfetcher {
-      root /usr/share/nginx/html;
-      default_type application/json;
-    }
-  }
-}
-EOF
-  fi
-  if [ "$(podman container exists nginx-cache && podman inspect -f '{{.State.Running}}' nginx-cache 2>/dev/null || echo false)" != "true" ]; then
-    echo "(Re)starting nginx-cache container"
-    if podman container exists nginx-cache; then podman rm -f nginx-cache >/dev/null 2>&1 || true; fi
-    podman run -d --restart=always --pod "$pod_name" \
-      --name nginx-cache \
-      --env-file "$env_file" \
-      -v "${conf_dir}:/etc/nginx" \
-      -v "${cache_dir}:/cache" \
-      -v "${host_base}/output.json:/usr/share/nginx/html/jobfetcher/output.json:ro" \
-      "$image"
-  else
-    echo "nginx-cache container already running"
   fi
 }
