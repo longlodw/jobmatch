@@ -38,12 +38,16 @@ type EmbeddingScore struct {
 }
 
 type IStorage interface {
+	SelectLock(ctx context.Context, v int64) error
+	SelectUnlock(ctx context.Context, v int64) error
 	InsertUser(ctx context.Context, id, refreshToken, accessToken string, tokenExpiry time.Time) error
 	UpdateUserSearchURL(ctx context.Context, id string, searchURL string) error
 	UpdateUserLastSearched(ctx context.Context, id string) error
+	UpdateRunAndDatasetID(ctx context.Context, id, runID, datasetID string) error
 	SelectUserTokens(ctx context.Context, id string) (refreshToken, accessToken string, tokenExpiry time.Time, err error)
 	SelectUserSearchURL(ctx context.Context, id string) (searchURL sql.NullString, err error)
 	SelectUserLastSearched(ctx context.Context, id string) (lastSearched sql.NullTime, err error)
+	SelectRunAndDatasetID(ctx context.Context, id string) (runID, datasetID sql.NullString, err error)
 
 	InsertResume(ctx context.Context, id, userID string, embeddings [][]float32) error
 	UpdateResumeTimestamp(ctx context.Context, id, userID string) error
@@ -54,6 +58,7 @@ type IStorage interface {
 	InsertJob(ctx context.Context, id, userID, resumeID, jobContent string) error
 	UpdateJobStatus(ctx context.Context, id, userID, status string) error
 	SelectJobByStatus(ctx context.Context, userID, status string) (jobs []JobMetadata, err error)
+	SelectJobByID(ctx context.Context, id, userID string) (job JobMetadata, err error)
 
 	GetJobContent(ctx context.Context, id string) (jobContent string, err error)
 	StoreCode(ctx context.Context, state, codeVerifier string) error
@@ -104,6 +109,8 @@ func NewStorage(ctx context.Context, dbConnStr, pgSecret, minioEndpoint, minioAc
 			access_token BYTEA NOT NULL,
 			token_expiry TIMESTAMPTZ NOT NULL,
 			search_url TEXT DEFAULT NULL,
+			run_id TEXT DEFAULT NULL,
+			dataset_id TEXT DEFAULT NULL,
 			last_searched TIMESTAMPTZ DEFAULT NULL
 		);
 		CREATE TABLE IF NOT EXISTS resumes (
@@ -146,6 +153,16 @@ func NewStorage(ctx context.Context, dbConnStr, pgSecret, minioEndpoint, minioAc
 	}, nil
 }
 
+func (s *Storage) SelectLock(ctx context.Context, v int64) error {
+	_, err := s.db.ExecContext(ctx, `SELECT pg_advisory_lock($1);`, v)
+	return err
+}
+
+func (s *Storage) SelectUnlock(ctx context.Context, v int64) error {
+	_, err := s.db.ExecContext(ctx, `SELECT pg_advisory_unlock($1);`, v)
+	return err
+}
+
 func (s *Storage) InsertUser(ctx context.Context, id, refreshToken, accessToken string, tokenExpiry time.Time) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO users (id, refresh_token, access_token, token_expiry)
@@ -170,9 +187,18 @@ func (s *Storage) UpdateUserSearchURL(ctx context.Context, id string, searchURL 
 func (s *Storage) UpdateUserLastSearched(ctx context.Context, id string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE users
-		SET last_searched = NOW()
+		SET last_searched = NOW(), dataset_id = NULL,  run_id = NULL
 		WHERE id = $1;
 	`, id)
+	return err
+}
+
+func (s *Storage) UpdateRunAndDatasetID(ctx context.Context, id, runID, datasetID string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE users
+		SET run_id = $2, dataset_id = $3
+		WHERE id = $1;
+	`, id, runID, datasetID)
 	return err
 }
 
@@ -203,6 +229,15 @@ func (s *Storage) SelectUserLastSearched(ctx context.Context, id string) (lastSe
 		FROM users
 		WHERE id = $1;
 	`, id).Scan(&lastSearched)
+	return
+}
+
+func (s *Storage) SelectRunAndDatasetID(ctx context.Context, id string) (runID, datasetID sql.NullString, err error) {
+	err = s.db.QueryRowContext(ctx, `
+		SELECT run_id, dataset_id
+		FROM users
+		WHERE id = $1;
+	`, id).Scan(&runID, &datasetID)
 	return
 }
 
@@ -292,13 +327,13 @@ func (s *Storage) SelectResumesByUser(ctx context.Context, userID string, offset
 
 func (s *Storage) SelectResumesByEmbedding(ctx context.Context, userID string, embedding []float32, topK int) (resumes []EmbeddingScore, err error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT r.id AS id, max(1 - (re.embedding <#> $2)) AS similarity
+		SELECT r.id AS id, max(1 - (re.embedding <#> $1)) AS similarity
 		FROM resumes r
 		JOIN resume_embeddings re ON r.id = re.resume_id
-		WHERE r.user_id = $3
+		WHERE r.user_id = $2
 		GROUP BY r.id
 		ORDER BY similarity DESC
-		LIMIT $4;
+		LIMIT $3;
 	`, pgvector.NewVector(embedding), userID, topK)
 	if err != nil {
 		return nil, err
@@ -351,7 +386,7 @@ func (s *Storage) UpdateJobStatus(ctx context.Context, id, userID, status string
 
 func (s *Storage) SelectJobByStatus(ctx context.Context, userID, status string) (jobs []JobMetadata, err error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, status, last_updated
+		SELECT id, resume_id, status, last_updated
 		FROM jobs
 		WHERE user_id = $1 AND status = $2
 		LIMIT 20;
@@ -361,19 +396,33 @@ func (s *Storage) SelectJobByStatus(ctx context.Context, userID, status string) 
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var id, st string
+		var id, rid, st string
 		var lastUpdated time.Time
-		if err := rows.Scan(&id, &st, &lastUpdated); err != nil {
+		if err := rows.Scan(&id, &rid, &st, &lastUpdated); err != nil {
 			return nil, err
 		}
 		jobs = append(jobs, JobMetadata{
 			ID:         id,
 			UserID:     userID,
+			ResumeID:   rid,
 			Status:     st,
 			LastUpdate: lastUpdated,
 		})
 	}
 	return jobs, rows.Err()
+}
+
+func (s *Storage) SelectJobByID(ctx context.Context, id, userID string) (job JobMetadata, err error) {
+	err = s.db.QueryRowContext(ctx, `
+		SELECT id, resume_id, status, last_updated
+		FROM jobs
+		WHERE id = $1 AND user_id = $2;
+	`, id, userID).Scan(&job.ID, &job.ResumeID, &job.Status, &job.LastUpdate)
+	if err != nil {
+		return job, err
+	}
+	job.UserID = userID
+	return job, nil
 }
 
 func (s *Storage) GetJobContent(ctx context.Context, id string) (jobContent string, err error) {
