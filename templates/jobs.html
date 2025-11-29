@@ -63,11 +63,11 @@
       parent.querySelectorAll('button').forEach(b => {b.disabled = true; b.style.opacity = '.6';});
       const statusEl = document.getElementById('swipe-status');
       statusEl.textContent = 'Updating...';
+      // Optimistic advance to next card
+      advance();
+      // Send status update in background; success/error will render into #swipe-status when ready
       htmx.ajax('POST', '/job/status', {target: '#swipe-status', swap: 'innerHTML', values: {jobID: jobID, status: status}});
     }
-    document.body.addEventListener('htmx:afterOnLoad', function (evt) {
-      if (evt.detail.target && evt.detail.target.id === 'swipe-status') {advance();}
-    });
     document.querySelectorAll('.swipe-actions button').forEach(btn => {
       btn.addEventListener('click', function () {postStatus(this.dataset.job, this.dataset.status, this);});
     });
