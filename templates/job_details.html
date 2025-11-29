@@ -1,6 +1,6 @@
 {{define "job_details"}}
-<div class="panel" style="margin-top:12px" id="details-{{.JobID}}">
+<div class="panel mt-sm" id="details-{{.JobID}}">
   <div class="panel-header"><strong>Job Details</strong><button class="ghost" hx-get="/job/details/close?id={{.JobID}}" hx-target="#details-{{.JobID}}" hx-swap="outerHTML">Close</button></div>
-  <div class="panel-body"><pre style="white-space:pre-wrap;font-size:13px;line-height:1.35">{{.Content}}</pre></div>
+  <div class="panel-body"><pre class="pre-wrap-sm">{{.Content}}</pre></div>
 </div>
 {{end}}

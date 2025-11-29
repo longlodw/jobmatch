@@ -1,7 +1,9 @@
 {{define "jobs"}}
 <div class="panel">
   <div class="panel-header">
-    <div><strong>Jobs</strong><div class="help">Swipe through pending jobs</div></div>
+    <div><strong>Jobs</strong>
+      <div class="help">Swipe through pending jobs</div>
+    </div>
   </div>
   <div class="panel-body">
     <div class="swipe-wrapper">
@@ -9,23 +11,25 @@
       <div class="help">No pending jobs found.</div>
       {{else}}
       {{range $i, $j := .Jobs}}
-      <div class="swipe-card" data-index="{{$i}}" {{if ne $i 0}}style="display:none" {{end}} id="job-{{$j.ID}}">
+      <div class="swipe-card{{if ne $i 0}} hidden{{end}}" data-index="{{$i}}" id="job-{{$j.ID}}">
         <div class="swipe-head">
           <div class="swipe-title">{{$j.Title}}</div>
           <div class="swipe-meta">{{$j.CompanyName}} • {{$j.PostedAt}}</div>
-          <div class="swipe-meta" style="font-size:12px;color:#cfe8ff">Resume: {{$j.ResumeID}}</div>
+          <div class="swipe-meta text-resume">Resume: {{$j.ResumeID}}</div>
         </div>
         <div class="swipe-body">
           <div class="swipe-desc">{{$j.DescriptionText}}</div>
-          <div class="swipe-link"><a href="{{$j.Link}}" target="_blank" rel="noopener">Job Link</a></div>
+          <div class="swipe-link"><a href="{{$j.Link}}" target="_blank" rel="noopener">Go to job</a></div>
         </div>
         <div class="swipe-actions">
-          <button class="ghost swipe-no" data-job="{{$j.ID}}" data-status="NOT_INTERESTED">Not Interested</button>
-          <button class="swipe-yes" data-job="{{$j.ID}}" data-status="INTERESTED">Interested</button>
+          <div class="inner">
+            <button class="ghost swipe-no" data-job="{{$j.ID}}" data-status="NOT_INTERESTED">Not Interested</button>
+            <button class="swipe-yes" data-job="{{$j.ID}}" data-status="INTERESTED">Interested</button>
+          </div>
         </div>
       </div>
       {{end}}
-      <div id="swipe-status" class="help" style="margin-top:12px"></div>
+      <div id="swipe-status" class="help mt-sm"></div>
       {{end}}
     </div>
   </div>
@@ -33,7 +37,7 @@
 <script>
   (function () {
     const cards = Array.from(document.querySelectorAll('.swipe-card')); let idx = 0;
-    function show(n) {cards.forEach((c, i) => {c.style.display = i === n ? 'block' : 'none'});}    
+    function show(n) {cards.forEach((c, i) => {if(i===n){c.classList.remove('hidden');} else {c.classList.add('hidden');}});}
     let refetchAttempts = 0; const maxRefetch = 3; let lastRefetch = 0; const refetchCooldown = 5000;
     function advance() {
       idx++;

@@ -6,14 +6,13 @@
   <div class="panel-body">
     {{if .Authenticated}}
     <form hx-post="/resumes/upload" hx-target="#main-area" hx-swap="innerHTML"
-      style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+      class="flex wrap gap-sm mb-sm">
       <input name="fileID" class="input" placeholder="Google Doc File ID" required />
       <button>Upload</button>
     </form>
     <div id="resumeUploadStatus" class="help"></div>
-    <div class="grid-resumes"
-      style="margin-top:10px; display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:12px;">
-      {{if eq (len .Resumes) 0}}<div class="help" style="grid-column:1/-1">No resumes uploaded.</div>{{end}}
+    <div class="grid-resumes">
+      {{if eq (len .Resumes) 0}}<div class="help grid-span-all">No resumes uploaded.</div>{{end}}
       {{range .Resumes}}
       <div class="job-card">
         <div class="job-head">
@@ -23,7 +22,7 @@
         <div class="help">Last Updated: {{.LastUpdated}}</div>
         <form hx-post="/resumes/delete" hx-target="#main-area" hx-swap="innerHTML"
           hx-confirm="Delete this resume?"
-          style="display:flex;gap:8px;margin-top:8px">
+          class="flex gap-sm mt-xs">
           <input type="hidden" name="resumeID" value="{{.ID}}" />
           <button class="danger">Delete</button>
         </form>
